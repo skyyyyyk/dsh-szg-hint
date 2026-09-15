@@ -1,0 +1,41 @@
+# 最小 CI：装依赖 → 构建 → 跑三层测试（单测 / 宿主运行时探针 / 产物质检）。
+# 不含发布步骤：发布由维护者手动执行（版本号与 CHANGELOG 需要人工确认）。
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  verify:
+    # Windows 也在支持范围内（宿主主战场），但 Linux 足以暴露平台无关的回归，
+    # 故矩阵只跑两种 Node 版本以控制时长；平台相关的坑由维护者本机跑 test:all 覆盖。
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.19', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run typecheck
+
+      - run: pnpm run build
+
+      - run: pnpm run test
+
+      - run: pnpm run test:probe
+
+      - run: pnpm run test:artifact

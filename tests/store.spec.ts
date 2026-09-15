@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { HintStore } from '../src/store.ts'
+import { HintStore, type HintStoreOptions } from '../src/store.ts'
 
 const dirs: string[] = []
 
@@ -20,7 +20,7 @@ const dirs: string[] = []
  * @param options - 存储参数覆盖。
  * @returns 队列实例与它的临时目录。
  */
-function makeStore(options: Parameters<typeof HintStore.prototype.constructor>[1] = {}): {
+function makeStore(options: Partial<HintStoreOptions> = {}): {
   store: HintStore
   dir: string
 } {

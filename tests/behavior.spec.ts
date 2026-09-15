@@ -20,9 +20,16 @@ const BUILD_HINT = '缺 lib/index.js：先跑 `npm run build` 再跑测试（或
 
 process.env['DSH_HOME'] = mkdtempSync(join(tmpdir(), 'dsh-szg-hint-behavior-'))
 
+/** 注册的工具：只保留模型可见的契约字段（名称、说明、参数说明）。 */
+interface CapturedTool {
+  name: string
+  description?: string
+  parameters?: { properties?: Record<string, { description?: string }> }
+}
+
 interface Captured {
   routes: { handler: (req: never, res: never) => void }[]
-  tools: Map<string, { description?: string, parameters?: { properties?: Record<string, { description?: string }> } }>
+  tools: Map<string, CapturedTool>
   listeners: Map<string, (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>>
 }
 
@@ -36,7 +43,7 @@ function bootPlugin(plugin: { apply: (ctx: unknown, config: unknown) => void, Co
       captured.listeners.set(event, handler)
       return () => {}
     },
-    tools: { register: (tool: { name: string }) => { captured.tools.set(tool.name, tool); return () => {} } },
+    tools: { register: (tool: CapturedTool) => { captured.tools.set(tool.name, tool); return () => {} } },
     webServer: { port: 0, register: (route: Captured['routes'][number]) => { captured.routes.push(route); return () => {} } },
     logger: { warn: () => {}, error: () => {}, info: () => {} },
   }

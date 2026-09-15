@@ -4,6 +4,20 @@
   "description": "DeepSeek Harness plugin: drop a hint into a running task and the agent picks it up at its next step — without interrupting it and without polluting the chat history. · 旁路提示：任务执行中插一句话，AI 下一步即刻参考。",
   "type": "module",
   "license": "MIT",
+  "author": {
+    "name": "szg"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szg/dsh-szg-hint.git"
+  },
+  "homepage": "https://github.com/szg/dsh-szg-hint#readme",
+  "bugs": {
+    "url": "https://github.com/szg/dsh-szg-hint/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -69,10 +83,10 @@
     "@deepseek-ai/schemastery": "^3.18.2",
     "@types/node": "^26.0.0",
     "@types/react": "^18.3.0",
-    "lightningcss": "^1.33.0",
+    "lightningcss": "^1.32.0",
     "react": "^18.3.1",
-    "tsdown": "^0.23.0",
-    "typescript": "^5.9.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.0",
     "vitest": "^4.1.0"
   }
 }
