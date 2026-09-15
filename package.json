@@ -65,13 +65,13 @@
     }
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:probe": "node tests/host-runtime-probe.mjs",
     "test:artifact": "node tests/artifact-check.mjs",
     "test:all": "npm run test && npm run test:probe && npm run test:artifact",
-    "prepare": "tsdown"
+    "prepare": "tsdown && tsc -p tsconfig.build.json"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

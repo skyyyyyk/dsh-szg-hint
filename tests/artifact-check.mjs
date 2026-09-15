@@ -12,7 +12,7 @@
  * 用法：node tests/artifact-check.mjs [插件包根目录，默认本仓库]
  */
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -78,6 +78,21 @@ check('客户端事件/状态路径由前缀派生',
 const rawPaths = uniq([...client.matchAll(/['"](\/[A-Za-z0-9_\-/]*)['"]/g)].map(m => m[1])).filter(p => p.includes('hint'))
 check('客户端不含硬编码的路径字面量（避免与宿主漂移）',
   rawPaths.every(p => p === '/dsh-szg-hint'), rawPaths)
+
+// ── 发布入口自检 ──
+// package.json 声明的每个入口（main、types、exports 的各分支）都必须在磁盘上真实存在。
+// 「声明了 types 却从没产出」在开发与单测里都不报错，只在别人装包后表现为类型缺失，
+// 所以把它固化成发布前必过的一条。
+const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
+const declaredEntries = uniq([
+  manifest.main,
+  manifest.types,
+  ...Object.values(manifest.exports ?? {}).flatMap(branch =>
+    typeof branch === 'string' ? [branch] : Object.values(branch)),
+].filter(entry => typeof entry === 'string' && entry.startsWith('.')))
+const missingEntries = declaredEntries.filter(entry => !existsSync(join(repo, entry)))
+check('package.json 声明的入口文件全部存在', missingEntries.length === 0,
+  missingEntries.length > 0 ? { missing: missingEntries } : `${String(declaredEntries.length)} 个入口`)
 
 const failed = results.filter(r => !r.ok)
 for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.label}${r.detail === undefined ? '' : `  — got: ${r.detail}`}`)
