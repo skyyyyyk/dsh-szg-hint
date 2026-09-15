@@ -5,15 +5,15 @@
   "type": "module",
   "license": "MIT",
   "author": {
-    "name": "szg"
+    "name": "skyyyyyk"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/szg/dsh-szg-hint.git"
+    "url": "git+https://github.com/skyyyyyk/dsh-szg-hint.git"
   },
-  "homepage": "https://github.com/szg/dsh-szg-hint#readme",
+  "homepage": "https://github.com/skyyyyyk/dsh-szg-hint#readme",
   "bugs": {
-    "url": "https://github.com/szg/dsh-szg-hint/issues"
+    "url": "https://github.com/skyyyyyk/dsh-szg-hint/issues"
   },
   "publishConfig": {
     "access": "public"
