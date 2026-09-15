@@ -561,6 +561,13 @@ export function apply(ctx: Context, config: Config): void {
     if (payload.signal?.aborted === true) return decision
     const taken = store.consume(sessionIdOfPayload(payload), maxPerStep)
     if (taken.length === 0) return decision
+    if (decision.kind === 'reject') {
+      // 拒绝 = 这一步不会发出请求（拿不到会话 id 时只取全局）：把它取走就等于永久丢提示。
+      // 这里按「注入失败」同一条纪律回滚，绝不出现「标了已参考、模型却没看到」。
+      const restored = store.restore(taken.map(item => item.id))
+      process.stderr.write(`[dsh-szg-hint] 本步被拒绝，已回滚 ${String(restored)} 条提示待下一步\n`)
+      return decision
+    }
     let message: unknown
     try {
       const text = renderInjection(taken)

@@ -117,6 +117,7 @@ npm run build       # tsdown → lib/index.js（宿主）+ lib/client.js（浏�
 |---|---|---|
 | `tests/store.spec.ts` | 队列契约（12 例）：原子消费不重复、最旧优先与单步上限、会话/全局作用域、拿不到会话时只取全局、撤销三态、注入失败回滚、单会话上限与 `dropped` 报告、空白拒绝与截断、运行态信号、重启后不重复消费、坏行跳过、快照口径 | `npm test` |
 | `tests/host-runtime-probe.mjs` | 宿主接线（10 项）：ESM 可导入、导出契约（name / inject / Config / apply）、路由前缀、两个工具、两类订阅、注册全部走 `ctx.effect` | `node tests/host-runtime-probe.mjs` |
+| `tests/behavior.spec.ts` | 行为（13 例，需先 build）：真实 HTTP 数据面（入队 / 快照 / 撤销三态 / 空白与跨站拒绝）、注入语义（会话+全局合并与编号、consumed 不重复、会话隔离、拿不到会话只取全局）、**本步被下游拒绝时回滚待下一步**、并发取走不重复、积压上限与超长截断、重启不重复注入、坏行容错、模型侧工具契约 | `npm test` |
 
 ## Known Limitations and Deferred Work
 
