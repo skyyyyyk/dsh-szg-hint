@@ -1,0 +1,5 @@
+# 双语对等记录（规范见 dsh 的 docs/i18n）：两侧同等权威，改任一侧都要带上另一侧，
+# 然后重新记录。下面是「上次确认一致」时各侧的 git blob 哈希。
+#   node tests/i18n-record.mjs --write
+README.md: 5e641071fc87357a815afb79e9be6a2b2bc334d9
+README.zh.md: 75478c498a840e9b0597aaff7e3995ac12b6daac

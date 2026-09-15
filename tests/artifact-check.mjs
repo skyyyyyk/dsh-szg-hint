@@ -9,9 +9,12 @@
  *  - lib/index.js（宿主）：语法、导出契约、路由前缀、数据目录、工具在场、依赖外部化。
  *  - lib/client.js（浏览器）：语法、`__ModuleLoader__.load` 包装、React 走模块表、CSS 内联、路径同源。
  *
+ * 另外核对发布面：package.json 声明的入口文件是否都存在，以及双语 README 是否成对。
+ *
  * 用法：node tests/artifact-check.mjs [插件包根目录，默认本仓库]
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -93,6 +96,35 @@ const declaredEntries = uniq([
 const missingEntries = declaredEntries.filter(entry => !existsSync(join(repo, entry)))
 check('package.json 声明的入口文件全部存在', missingEntries.length === 0,
   missingEntries.length > 0 ? { missing: missingEntries } : `${String(declaredEntries.length)} 个入口`)
+
+// ── 双语 README（对齐 dsh 的双语对等规范：两侧同等权威）──
+// 三项合起来才构成「双语」这一约束：两侧都在、顶部互链、且内容与 README.i18n.yaml 的记录一致。
+// 第三项是「只改了一侧就提交」的检出口——那正是双语要求最容易失守的地方。
+const zhReadme = join(repo, 'README.zh.md')
+const enReadme = join(repo, 'README.md')
+const pairing = ['README.md', 'README.zh.md'].filter(name => !existsSync(join(repo, name)))
+check('双语 README 两侧都存在', pairing.length === 0, pairing)
+
+if (pairing.length === 0) {
+  const enText = readFileSync(enReadme, 'utf8')
+  const zhText = readFileSync(zhReadme, 'utf8')
+  check('双语 README 顶部互链',
+    enText.includes('[中文](README.zh.md)') && zhText.includes('[English](README.md)'),
+    'en→zh 或 zh→en 的链接缺失')
+
+  const recorded = Object.fromEntries(
+    [...readFileSync(join(repo, 'README.i18n.yaml'), 'utf8').matchAll(/^(README(?:\.zh)?\.md): ([0-9a-f]{40})$/gm)]
+      .map(match => [match[1], match[2]]))
+  const blobHash = text => {
+    const bytes = Buffer.from(text, 'utf8')
+    return createHash('sha1').update(`blob ${String(bytes.length)}\0`, 'utf8').update(bytes).digest('hex')
+  }
+  const drifted = [['README.md', enText], ['README.zh.md', zhText]]
+    .filter(([name, text]) => recorded[name] !== blobHash(text))
+    .map(([name]) => name)
+  check('双语 README 与 i18n 记录一致', drifted.length === 0,
+    drifted.length > 0 ? { drifted, fix: 'node tests/i18n-record.mjs --write' } : '两侧哈希均匹配')
+}
 
 const failed = results.filter(r => !r.ok)
 for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.label}${r.detail === undefined ? '' : `  — got: ${r.detail}`}`)
