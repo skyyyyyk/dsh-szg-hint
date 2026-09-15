@@ -18,7 +18,7 @@ const repo = process.argv[2] !== undefined && !process.argv[2].startsWith('--')
   ? process.argv[2]
   : join(dirname(fileURLToPath(import.meta.url)), '..')
 const write = process.argv.includes('--write')
-const pairs = ['README.md', 'README.zh.md']
+const pairs = ['README.md', 'README.en.md']
 const recordPath = join(repo, 'README.i18n.yaml')
 
 /** git 对 blob 的寻址口径：`blob <字节数>\0<内容>` 的 sha1 —— 与 `git hash-object` 一致。 */
@@ -31,7 +31,7 @@ const gitBlobHash = text => {
 const readRecorded = () => {
   if (!existsSync(recordPath)) return {}
   const text = readFileSync(recordPath, 'utf8')
-  return Object.fromEntries([...text.matchAll(/^(README(?:\.zh)?\.md): ([0-9a-f]{40})$/gm)]
+  return Object.fromEntries([...text.matchAll(/^(README(?:\.[a-zA-Z-]+)?\.md): ([0-9a-f]{40})$/gm)]
     .map(match => [match[1], match[2]]))
 }
 

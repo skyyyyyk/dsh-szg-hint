@@ -97,31 +97,30 @@ const missingEntries = declaredEntries.filter(entry => !existsSync(join(repo, en
 check('package.json 声明的入口文件全部存在', missingEntries.length === 0,
   missingEntries.length > 0 ? { missing: missingEntries } : `${String(declaredEntries.length)} 个入口`)
 
-// ── 双语 README（对齐 dsh 的双语对等规范：两侧同等权威）──
+// ── 双语 README（对齐 dsh 的双语对等规范：两侧同等权威，默认中文）──
 // 三项合起来才构成「双语」这一约束：两侧都在、顶部互链、且内容与 README.i18n.yaml 的记录一致。
 // 第三项是「只改了一侧就提交」的检出口——那正是双语要求最容易失守的地方。
-const zhReadme = join(repo, 'README.zh.md')
-const enReadme = join(repo, 'README.md')
-const pairing = ['README.md', 'README.zh.md'].filter(name => !existsSync(join(repo, name)))
+// 默认位与镜像位对调只需改下面这个常量：互链断言是双向推导的，不写死语言方向。
+const bilingualPair = ['README.md', 'README.en.md']
+const pairing = bilingualPair.filter(name => !existsSync(join(repo, name)))
 check('双语 README 两侧都存在', pairing.length === 0, pairing)
 
 if (pairing.length === 0) {
-  const enText = readFileSync(enReadme, 'utf8')
-  const zhText = readFileSync(zhReadme, 'utf8')
-  check('双语 README 顶部互链',
-    enText.includes('[中文](README.zh.md)') && zhText.includes('[English](README.md)'),
-    'en→zh 或 zh→en 的链接缺失')
+  const unlinked = bilingualPair.filter(name => {
+    const other = bilingualPair.find(candidate => candidate !== name)
+    return !readFileSync(join(repo, name), 'utf8').includes(`](${other})`)
+  })
+  check('双语 README 顶部互链', unlinked.length === 0, unlinked)
 
   const recorded = Object.fromEntries(
-    [...readFileSync(join(repo, 'README.i18n.yaml'), 'utf8').matchAll(/^(README(?:\.zh)?\.md): ([0-9a-f]{40})$/gm)]
+    [...readFileSync(join(repo, 'README.i18n.yaml'), 'utf8').matchAll(/^(README(?:\.[a-zA-Z-]+)?\.md): ([0-9a-f]{40})$/gm)]
       .map(match => [match[1], match[2]]))
   const blobHash = text => {
     const bytes = Buffer.from(text, 'utf8')
     return createHash('sha1').update(`blob ${String(bytes.length)}\0`, 'utf8').update(bytes).digest('hex')
   }
-  const drifted = [['README.md', enText], ['README.zh.md', zhText]]
-    .filter(([name, text]) => recorded[name] !== blobHash(text))
-    .map(([name]) => name)
+  const drifted = bilingualPair
+    .filter(name => recorded[name] !== blobHash(readFileSync(join(repo, name), 'utf8')))
   check('双语 README 与 i18n 记录一致', drifted.length === 0,
     drifted.length > 0 ? { drifted, fix: 'node tests/i18n-record.mjs --write' } : '两侧哈希均匹配')
 }
