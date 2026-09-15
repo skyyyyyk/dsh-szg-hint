@@ -43,7 +43,7 @@ export interface HintConsumedView {
 }
 
 /**
- * 全量快照：SSE GstateG 帧与 GGET /szg-hint/stateG 返回**同一个**对象，
+ * 全量快照：SSE `state` 帧与 `GET /dsh-szg-hint/state` 返回**同一个**对象，
  * 浏览器半边因此只有一条应用路径（推来的与拉来的没有差别）。
  */
 export interface HintSnapshot {

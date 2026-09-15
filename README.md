@@ -28,12 +28,12 @@ dsh plugin --profile web add /path/to/dsh-szg-hint
 
 | 半边 | 职责 |
 |---|---|
-| Host（`src/index.ts` + `src/store.ts` + `src/protocol.ts`） | 队列（JSONL 落盘）、数据面路由 `/szg-hint/*`、`agent/pre-step` 注入、运行态订阅（`turn/start` / `turn/end`）、`hint_send` / `hint_status` 工具 |
+| Host（`src/index.ts` + `src/store.ts` + `src/protocol.ts`） | 队列（JSONL 落盘）、数据面路由 `/dsh-szg-hint/*`、`agent/pre-step` 注入、运行态订阅（`turn/start` / `turn/end`）、`hint_send` / `hint_status` 工具 |
 | Client（`src/client/`） | `./link.ts` 一条宿主链路（SSE + 降级轮询 + 写操作），`HintBar.tsx` 工具行右侧的紧凑入口（`conversation.input.right`，28px 圆钮 + 上弹面板）：待参考计数角标、输入面板（Enter 发送 / Shift+Enter 换行）、待参考列表与撤销、最近已参考、右上角轻提示 |
 
 两侧共用 `src/protocol.ts` 的类型契约（只有类型，没有运行时代码）。
 
-数据落 `$DSH_HOME/szg-hint/hints.jsonl`（append-only 事件流：`put` / `del` 两态，启动回放即得当前
+数据落 `$DSH_HOME/dsh-szg-hint/hints.jsonl`（append-only 事件流：`put` / `del` 两态，启动回放即得当前
 状态；行数超过 2000 自动压缩成「待消费 + 最近 20 条已消费」）。`consumed` 落盘的意义是**重启不重复
 消费**：模型已经看过的提示不会再灌一遍。
 
@@ -41,10 +41,10 @@ dsh plugin --profile web add /path/to/dsh-szg-hint
 
 | 通道 | 用途 | 行为 |
 |---|---|---|
-| `GET /szg-hint/events`（SSE） | 主通道 | 状态一变推一帧 `event: state`（完整快照，含 `revision`）；动作推一帧 `event: hint`（`added` / `consumed` / `cancelled`，供轻提示）；开通道先写注释行与 `retry`，之后每 25 秒一条 `: ping`。空闲时零流量 |
-| `GET /szg-hint/state` | 轮询兜底 | 返回**同一个**快照，供 SSE 不可用（老宿主 / 代理干扰）时降级；4 秒一次，连续失败降频到 12 秒 |
-| `POST /szg-hint` | 入队 | 同源校验；body `{ text, sessionId? }`（`sessionId` 留空 = 全局）；返回 `{ ok, hintId, running, dropped }`；`running` 说明「该会话此刻是否在跑回合」，前端据此选文案 |
-| `DELETE /szg-hint`（body `{ id }`）| 撤销 | 待参考可撤；已被参考返回 409、不存在返回 404（中文原因，前端直接展示）。`DELETE /szg-hint/<id>` 是同一动作的路径形式，方便 curl |
+| `GET /dsh-szg-hint/events`（SSE） | 主通道 | 状态一变推一帧 `event: state`（完整快照，含 `revision`）；动作推一帧 `event: hint`（`added` / `consumed` / `cancelled`，供轻提示）；开通道先写注释行与 `retry`，之后每 25 秒一条 `: ping`。空闲时零流量 |
+| `GET /dsh-szg-hint/state` | 轮询兜底 | 返回**同一个**快照，供 SSE 不可用（老宿主 / 代理干扰）时降级；4 秒一次，连续失败降频到 12 秒 |
+| `POST /dsh-szg-hint` | 入队 | 同源校验；body `{ text, sessionId? }`（`sessionId` 留空 = 全局）；返回 `{ ok, hintId, running, dropped }`；`running` 说明「该会话此刻是否在跑回合」，前端据此选文案 |
+| `DELETE /dsh-szg-hint`（body `{ id }`）| 撤销 | 待参考可撤；已被参考返回 409、不存在返回 404（中文原因，前端直接展示）。`DELETE /dsh-szg-hint/<id>` 是同一动作的路径形式，方便 curl |
 
 浏览器半边只有一条应用路径（`normalizeSnapshot` + 状态替换），「推来的」与「拉来的」在组件看来完全一样；
 动作帧只用于弹轻提示（按提示 id 去重，SSE 重放不会重复弹）。页面不可见时整条链路断开（不占浏览器每源连接配额）。
@@ -53,7 +53,7 @@ dsh plugin --profile web add /path/to/dsh-szg-hint
 
 - 扩展点：`agent/pre-step` waterfall——与记忆插件的逐轮段同一个钩子（系统提示词装配之后、模型请求之前），
   但**每一步都检查**：任务跑着的时候用户随时可能发提示，下一步就该看到它，无论那是第几步。
-- 注入形态：一条 `plugin` 来源的 user 消息（`source.plugin = 'szg-hint'`，`form: snapshot`，段名「旁路提示」），
+- 注入形态：一条 `plugin` 来源的 user 消息（`source.plugin = 'dsh-szg-hint'`，`form: snapshot`，段名「旁路提示」），
   追加进本步消息序列；**它不写进对话历史**，只在这一步出现。
 - 归属：按 pre-step 负载里的会话取（`payload.agent.session`），命中该会话的与全局（`sessionId = ''`）提示，
   最旧优先，单步最多 20 条。拿不到会话 id 时**只取全局**——「拿不到归属」不等于「可以把别的会话的提示喂过来」。
@@ -100,12 +100,12 @@ dsh plugin --profile web add /path/to/dsh-szg-hint
 
 ## 挂载与重建
 
-`$DSH_HOME/profiles/web/cordis.patch.yml` 的 insert 行（`id: szg-hint`），依赖记在
-`profiles/web/package.json` 的 `link:` 条目上；**新增条目不会被 patchReload 热更新，必须重启 dsh**。
+本包自带 `cordis.patch.yml`（`insert` 一行 `id: dsh-szg-hint`），`dsh plugin add` 会把它登记成
+profile 的一个 bundle 层。**新增条目不会被 patchReload 热更新，必须重启 `dsh web`**。
 
 ```sh
-pnpm --filter @szg/dsh-szg-hint exec tsc -b        # lib/types（host + client 两个编译面）
-pnpm --filter @szg/dsh-szg-hint exec tsdown        # lib/index.js（宿主）+ lib/client.js（浏览器）
+npm run typecheck   # tsc --noEmit（host 与 client 一起看）
+npm run build       # tsdown → lib/index.js（宿主）+ lib/client.js（浏览器）
 ```
 
 - 改 `src/client/`：重建 `lib/client.js` 即按内容哈希热更新，不必刷新页面。
@@ -115,16 +115,15 @@ pnpm --filter @szg/dsh-szg-hint exec tsdown        # lib/index.js（宿主）+ l
 
 | 用例 | 覆盖 | 命令 |
 |---|---|---|
-| `tests/store.spec.ts` | 队列契约（12 例）：原子消费不重复、最旧优先与单步上限、会话/全局作用域、拿不到会话时只取全局、撤销三态、注入失败回滚、单会话上限与 `dropped` 报告、空白拒绝与截断、运行态信号、重启后不重复消费、坏行跳过、快照口径 | `pnpm exec vitest run packages/szg/hint/tests/store.spec.ts` |
+| `tests/store.spec.ts` | 队列契约（12 例）：原子消费不重复、最旧优先与单步上限、会话/全局作用域、拿不到会话时只取全局、撤销三态、注入失败回滚、单会话上限与 `dropped` 报告、空白拒绝与截断、运行态信号、重启后不重复消费、坏行跳过、快照口径 | `npm test` |
+| `tests/host-runtime-probe.mjs` | 宿主接线（10 项）：ESM 可导入、导出契约（name / inject / Config / apply）、路由前缀、两个工具、两类订阅、注册全部走 `ctx.effect` | `node tests/host-runtime-probe.mjs` |
 
 ## Known Limitations and Deferred Work
 
-- **UI 文案是中文硬编码**，与同目录的 `@szg/dsh-szg-pet` / `@szg/dsh-szg-token-report` 一致。
-  `verify-client-ui-i18n` 会把这些 szg 包判红（既存状态，非本包引入）；若要绿灯需整体走 locales 抽取。
-- 只做文本提示：szg 侧「图片/录音转文字再发提示」依赖那边的附件管道，dsh 侧输入区槽位没有对应能力，
-  先用 dsh 自带的输入附件通道。
+- **UI 文案是中文硬编码**：界面语言不跟随宿主 locale，要支持多语言需整体走 locales 抽取。
+- 只做文本提示：图片 / 录音转文字再发提示需要额外的附件管道，dsh 输入区的附件通道可直接用。
 - 提示**不进对话历史**，因此刷新页面后聊天区看不到它；待参考与「最近已参考」由快照提供（不落前端历史，
-  与 szg 的 localStorage 记录相比少了跨浏览器持久化）。
+  因此也没有跨浏览器持久化）。
 - 运行态来自 `turn/start` / `turn/end`：宿主重启后内存里的「在跑」集合清空，第一次 turn 事件前
   `running` 为假（文案退化为「下个任务参考」，提示本身照常入队）。
 - 多会话并行时 SSE 推的是全局快照，前端按自己的会话过滤；跨会话的动作帧（别的标签页发的提示）
