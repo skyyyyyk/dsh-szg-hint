@@ -47,7 +47,7 @@ export const name = PLUGIN_ID
  * 而不是 `ctx.get('webServer')`：声明过的依赖在属性上是就绪的，缺席时得到 undefined 能被下面的
  * 分支明确报告，而 `ctx.get` 对未就绪服务是挂起语义、路径不可控。
  */
-export const inject = ['tools', 'webServer']
+export const inject = ['tools', 'webServer', 'connection']
 
 /** 插件配置。 */
 export interface Config {
@@ -99,6 +99,16 @@ interface WebServerLike {
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
   }): () => void
+}
+
+/** 连接信任围栏的最小形状（`connection` 服务的 requestRejection）。 */
+interface ConnectionLike {
+  /**
+   * 判一次请求是否该被拒。
+   * @param request - 请求（只读 headers）。
+   * @returns 403=Host 不受信 / 401=浏览器未认证 / undefined=放行。
+   */
+  requestRejection(request: { readonly headers: IncomingMessage['headers'] }): 401 | 403 | undefined
 }
 
 /** `agent/pre-step` 事件负载的结构化最小子集。 */
@@ -394,10 +404,35 @@ function sameOrigin(req: IncomingMessage): boolean {
 
 /** 处理 PLUGIN_ID 前缀下的全部请求（路径分派）。 */
 async function handleHintRequest(
-  deps: { store: HintStore; hub: HintHub; maxBodyBytes: number; maxContentChars: number },
+  deps: {
+    store: HintStore
+    hub: HintHub
+    maxBodyBytes: number
+    maxContentChars: number
+    /** 连接信任围栏；缺席时按「无认证面」处理（见 `apply` 的告警）。 */
+    trust: ConnectionLike | undefined
+  },
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  // 数据面必须先过宿主的连接信任围栏：`sameOrigin` 只拦「带外站 Origin」的浏览器
+  // 跨站请求，对无 Origin 的本地脚本一律放行——不加这道闸，任何本机进程都能读走
+  // 用户的提示队列，甚至往正在执行的任务里注入指令。浏览器正常请求带 cookie，
+  // 因此这里放行的是「已认证的页面」，拒绝的是「没拿到 token 的第三方调用」。
+  if (deps.trust === undefined) {
+    writeJson(res, 503, { ok: false, error: '宿主缺少 connection 服务，无法校验请求来源' })
+    return
+  }
+  const rejection = deps.trust.requestRejection(req)
+  if (rejection !== undefined) {
+    writeJson(res, rejection, {
+      ok: false,
+      error: rejection === 401
+        ? '需要先通过宿主认证：访问 dsh web 打印的带 token 地址，再刷新页面'
+        : 'Host 不受信任',
+    })
+    return
+  }
   const url = new URL(req.url ?? '/', 'http://localhost')
   const path = url.pathname
   if (path === EVENTS_PATH) {
@@ -520,6 +555,13 @@ export function apply(ctx: Context, config: Config): void {
   store.onChange = () => { hub.invalidate() }
   ctx.effect(() => () => hub.dispose(), 'szg-hint:hub')
 
+  // 连接信任围栏（`connection` 服务的 requestRejection）：数据面的认证闸门。
+  // `Reflect.get` 而不是属性直取——与官方 open-in-app 同一写法，不依赖跨包类型增强。
+  const trust = Reflect.get(ctx as object, 'connection') as ConnectionLike | undefined
+  if (trust === undefined) {
+    process.stderr.write('[dsh-szg-hint] connection 服务缺席，数据面不做来源校验（仅本机回环场景可接受）\n')
+  }
+
   // ── 数据面路由 ──
   // 独立仓库不带宿主的 Context 类型增强，`ctx.webServer` 只能按结构断言取值；
   // 形状由上面的 WebServerLike 约束，缺席时得到 undefined 并走下面的降级分支。
@@ -538,6 +580,7 @@ export function apply(ctx: Context, config: Config): void {
             hub,
             maxBodyBytes: 64 * 1024,
             maxContentChars,
+            trust,
           }, req, res),
         })
         return () => dispose()

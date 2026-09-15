@@ -31,11 +31,19 @@ interface Captured {
   routes: { handler: (req: never, res: never) => void }[]
   tools: Map<string, CapturedTool>
   listeners: Map<string, (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>>
+  /** 信任围栏的返回：未设=放行；401/403=模拟未认证 / Host 不受信。 */
+  rejection?: 401 | 403 | undefined
 }
 
 /** 按插件真实调用顺序捕获贡献（结构与 `tests/host-runtime-probe.mjs` 对齐）。 */
-function bootPlugin(plugin: { apply: (ctx: unknown, config: unknown) => void, Config: (input: object) => unknown }): Captured {
+function bootPlugin(
+  plugin: { apply: (ctx: unknown, config: unknown) => void, Config: (input: object) => unknown },
+  rejection?: 401 | 403 | undefined,
+): Captured {
   const captured: Captured = { routes: [], tools: new Map(), listeners: new Map() }
+  // `connection` 是数据面的认证闸门：宿主 stub 必须提供它，否则每个请求都会走
+  // 「缺少 connection 服务」分支拿 503。默认放行；传 rejection 时模拟未认证 / Host 不受信。
+  captured.rejection = rejection
   const ctx = {
     get: (name: string) => (name === 'webServer' ? ctx.webServer : undefined),
     effect: (cb: () => unknown) => { const d = cb(); return () => { if (typeof d === 'function') d() } },
@@ -45,6 +53,7 @@ function bootPlugin(plugin: { apply: (ctx: unknown, config: unknown) => void, Co
     },
     tools: { register: (tool: CapturedTool) => { captured.tools.set(tool.name, tool); return () => {} } },
     webServer: { port: 0, register: (route: Captured['routes'][number]) => { captured.routes.push(route); return () => {} } },
+    connection: { requestRejection: () => captured.rejection },
     logger: { warn: () => {}, error: () => {}, info: () => {} },
   }
   plugin.apply(ctx, plugin.Config({}))
@@ -343,6 +352,60 @@ describeIfBuilt('dsh-szg-hint 行为（需要 lib/ 产物）', () => {
     expect(Object.keys(send?.parameters?.properties ?? {})).toEqual(['text', 'sessionId'])
     expect(send?.description?.length ?? 0).toBeGreaterThan(20)
     expect(status?.parameters?.properties?.['sessionId']?.description).toContain('*')
+  })
+})
+
+describeIfBuilt('数据面的来源校验（信任围栏）', () => {
+  let plugin: { apply: (ctx: unknown, config: unknown) => void, Config: (input: object) => unknown }
+  let captured: Captured
+  let server: { base: string, close: () => void }
+
+  beforeAll(async () => {
+    // 与主行为块同一装载方式：产物从 lib/ 动态导入（跳过场景下不会被求值）。
+    plugin = (await import(LIB)) as typeof plugin
+    captured = bootPlugin(plugin)
+    server = await serve(captured)
+  })
+
+  afterAll(() => {
+    // 构建产物缺失时 `beforeAll` 里的 serve 会抛错，`server` 从未赋值：别让清理掩盖失败原因。
+    if (server !== undefined) server.close()
+  })
+
+  /** 带 redirect:manual —— 否则 fetch 会把 3xx / 4xx 处理得看不出原始状态。 */
+  const getState = (): Promise<Response> => fetch(`${server.base}/dsh-szg-hint/state`, { redirect: 'manual' })
+
+  const postHint = (): Promise<Response> => fetch(`${server.base}/dsh-szg-hint`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '未认证也不该写进来', sessionId: '' }),
+  })
+
+  it('放行时不拦（页面已认证的正常路径）', async () => {
+    captured.rejection = undefined
+    expect((await getState()).status).toBe(200)
+  })
+
+  it('信任围栏判 401 时读接口被拒（不再泄露队列内容）', async () => {
+    captured.rejection = 401
+    const res = await getState()
+    expect(res.status).toBe(401)
+    const body = await res.json() as { ok?: boolean }
+    expect(body.ok).toBe(false)
+  })
+
+  it('信任围栏判 401 时写接口被拒（否则任何人可向任务注入指令）', async () => {
+    captured.rejection = 401
+    expect((await postHint()).status).toBe(401)
+    captured.rejection = undefined
+    const seen = await (await getState()).json() as { pending?: { content?: string }[] }
+    expect((seen.pending ?? []).some(x => x.content === '未认证也不该写进来')).toBe(false)
+  })
+
+  it('信任围栏判 403 时按 403 回（Host 不受信）', async () => {
+    captured.rejection = 403
+    expect((await getState()).status).toBe(403)
+    captured.rejection = undefined
   })
 })
 
