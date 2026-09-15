@@ -10,7 +10,7 @@
  * 依赖 `lib/`（`npm test` 前会先 build）：产物缺失时整个文件跳过并说明原因，而不是误报失败。
  */
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, get as httpGet } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -74,6 +74,38 @@ function injectedText(decision: { messages?: { content?: { text?: string }[] }[]
   const last = decision.messages?.at(-1)
   const text = last?.content?.[0]?.text ?? ''
   return text.includes('旁路提示') ? text : ''
+}
+
+/** 挂在 SSE 通道上，收集 `hint` 动作帧（前端据此弹 toast）。 */
+async function collectHintFrames(baseUrl: string, run: () => Promise<unknown>): Promise<Record<string, unknown>[]> {
+  const frames: Record<string, unknown>[] = []
+  const url = new URL('/dsh-szg-hint/events', baseUrl)
+  const req = httpGet({ hostname: url.hostname, port: url.port, path: url.pathname, headers: { accept: 'text/event-stream' } })
+  await new Promise<void>((resolve, reject) => {
+    req.on('response', res => {
+      res.setEncoding('utf8')
+      let buffer = ''
+      res.on('data', (chunk: string) => {
+        buffer += chunk
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() ?? ''
+        for (const block of blocks) {
+          const event = /^event: (.+)$/m.exec(block)?.[1]
+          const data = /^data: (.+)$/m.exec(block)?.[1]
+          if (event === 'hint' && data !== undefined) frames.push(JSON.parse(data) as Record<string, unknown>)
+        }
+      })
+      res.on('error', () => {})
+      resolve()
+    })
+    req.on('error', reject)
+    setTimeout(() => { req.destroy() }, 4000)
+  })
+  await new Promise(resolve => { setTimeout(resolve, 120) })
+  await run()
+  await new Promise(resolve => { setTimeout(resolve, 250) })
+  req.destroy()
+  return frames
 }
 
 const describeIfBuilt = existsSync(LIB) ? describe : describe.skip
@@ -184,19 +216,28 @@ describeIfBuilt('dsh-szg-hint 行为（需要 lib/ 产物）', () => {
   })
 
   it('本步被下游拒绝时回滚，下一步仍能拿到（回归：不得静默吞提示）', async () => {
+    /** 已参考总数：判「有没有真的被消费」要看计数，不能看 messages 长度或最近列表（恒最多 20 条）。 */
+    const consumedTotal = async (): Promise<number> => {
+      const s = await (await fetch(`${base()}/dsh-szg-hint/state`)).json() as { stats?: { consumed?: number } }
+      return s.stats?.consumed ?? -1
+    }
     await fetch(`${base()}/dsh-szg-hint`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: '被拒也不该丢', sessionId: 'sess-X' }),
     })
+    const before = await consumedTotal()
     const rejected = await preStep(captured, { sessionId: 'sess-X', reject: true })
     expect(rejected.kind).toBe('reject')
     expect(rejected.messages).toBeUndefined()
+    // 关键判据：拒绝那一步不得把提示标记成已参考（否则它既没进请求、也离开了队列）。
+    expect(await consumedTotal()).toBe(before)
 
     const state = await (await fetch(`${base()}/dsh-szg-hint/state`)).json() as { pending: { content: string }[] }
     expect(state.pending.map(i => i.content)).toContain('被拒也不该丢')
 
     const recovered = await preStep(captured, { sessionId: 'sess-X', step: 2 })
     expect(injectedText(recovered)).toContain('被拒也不该丢')
+    expect(await consumedTotal()).toBe(before + 1)
   })
 
   it('并发步骤不会拿到同一条（同步取走即标记）', async () => {
@@ -269,6 +310,24 @@ describeIfBuilt('dsh-szg-hint 行为（需要 lib/ 产物）', () => {
     } finally {
       restarted.close()
     }
+  })
+
+  it('撤销回执按被撤销条目的会话广播（空串 = 全局，会让别的会话也弹提示）', async () => {
+    const created = await (await fetch(`${base()}/dsh-szg-hint`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '撤销回执要认会话', sessionId: 'sess-Z' }),
+    })).json() as { hintId: number }
+
+    const frames = await collectHintFrames(base(), async () => {
+      await fetch(`${base()}/dsh-szg-hint`, {
+        method: 'DELETE', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: created.hintId }),
+      })
+    })
+    const cancelled = frames.find(f => f['kind'] === 'cancelled')
+    expect(cancelled).toBeDefined()
+    expect(cancelled?.['sessionId']).toBe('sess-Z')
+    expect(String(cancelled?.['text'] ?? '')).toContain('撤销回执要认会话')
   })
 
   it('模型侧工具契约：hint_send 收 text/sessionId，hint_status 说明 `*` = 全部会话', () => {

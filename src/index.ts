@@ -448,16 +448,22 @@ async function handleHintRequest(
       }
       const body = asRecord(await readJsonBody(req, deps.maxBodyBytes))
       const id = Math.trunc(clampNumber(body['id'], 0, Number.MAX_SAFE_INTEGER, 0))
-      const result = id > 0 ? deps.store.cancel(id) : 'missing'
-      if (result === 'missing') {
+      const result = id > 0 ? deps.store.cancel(id) : { status: 'missing' as const }
+      if (result.status === 'missing') {
         writeJson(res, 404, { ok: false, error: '这条提示不存在（可能已被撤销）' })
         return
       }
-      if (result === 'consumed') {
+      if (result.status === 'consumed') {
         writeJson(res, 409, { ok: false, error: '这条提示 AI 已经参考过了，撤不回来' })
         return
       }
-      deps.hub.announce({ kind: 'cancelled', ids: [id], sessionId: '', text: '' })
+      // 回执按**被撤销条目的会话**广播：空串是「全局」语义，会让别的会话也弹一条撤销提示。
+      deps.hub.announce({
+        kind: 'cancelled',
+        ids: [id],
+        sessionId: result.entry.sessionId,
+        text: result.entry.content.slice(0, 80),
+      })
       writeJson(res, 200, { ok: true, hintId: id })
       return
     }
@@ -471,15 +477,20 @@ async function handleHintRequest(
       return
     }
     const id = Math.trunc(clampNumber(Number(path.slice(ROUTE_PREFIX.length + 1)), 0, Number.MAX_SAFE_INTEGER, 0))
-    const result = id > 0 ? deps.store.cancel(id) : 'missing'
-    if (result !== 'ok') {
-      writeJson(res, result === 'consumed' ? 409 : 404, {
+    const result = id > 0 ? deps.store.cancel(id) : { status: 'missing' as const }
+    if (result.status !== 'ok') {
+      writeJson(res, result.status === 'consumed' ? 409 : 404, {
         ok: false,
-        error: result === 'consumed' ? '这条提示 AI 已经参考过了，撤不回来' : '这条提示不存在（可能已被撤销）',
+        error: result.status === 'consumed' ? '这条提示 AI 已经参考过了，撤不回来' : '这条提示不存在（可能已被撤销）',
       })
       return
     }
-    deps.hub.announce({ kind: 'cancelled', ids: [id], sessionId: '', text: '' })
+    deps.hub.announce({
+      kind: 'cancelled',
+      ids: [id],
+      sessionId: result.entry.sessionId,
+      text: result.entry.content.slice(0, 80),
+    })
     writeJson(res, 200, { ok: true, hintId: id })
     return
   }
@@ -557,17 +568,20 @@ export function apply(ctx: Context, config: Config): void {
   const events = ctx as unknown as { on: (event: string, handler: PreStepHandler) => () => void }
   const preStep: PreStepHandler = async (payload, next) => {
     const decision = await next()
-    if (decision === undefined || decision.kind !== 'enter') return decision
+    // `next() !== enter`（下游拒绝 / 未返回决定）= 这一步不会发出请求，此时不能取走提示：
+    // 取走就等于永久丢（既没进请求，也没留在队列里）。先取一次只为判断是否有货，随后无条件放回。
+    if (decision === undefined || decision.kind !== 'enter') {
+      if (payload.signal?.aborted !== true) {
+        const rolledBack = store.restore(store.consume(sessionIdOfPayload(payload), maxPerStep).map(item => item.id))
+        if (rolledBack > 0) {
+          process.stderr.write(`[dsh-szg-hint] 本步未进入，已放回 ${String(rolledBack)} 条提示待下一步\n`)
+        }
+      }
+      return decision
+    }
     if (payload.signal?.aborted === true) return decision
     const taken = store.consume(sessionIdOfPayload(payload), maxPerStep)
     if (taken.length === 0) return decision
-    if (decision.kind === 'reject') {
-      // 拒绝 = 这一步不会发出请求（拿不到会话 id 时只取全局）：把它取走就等于永久丢提示。
-      // 这里按「注入失败」同一条纪律回滚，绝不出现「标了已参考、模型却没看到」。
-      const restored = store.restore(taken.map(item => item.id))
-      process.stderr.write(`[dsh-szg-hint] 本步被拒绝，已回滚 ${String(restored)} 条提示待下一步\n`)
-      return decision
-    }
     let message: unknown
     try {
       const text = renderInjection(taken)

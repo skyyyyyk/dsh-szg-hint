@@ -78,7 +78,7 @@ describe('HintStore', () => {
     expect(store.pendingFor('s9')).toHaveLength(1)
   })
 
-  it('撤销：待消费可撤、已消费拒绝、不存在报 missing', () => {
+  it('撤销：待消费可撤（回执带条目快照）、已消费拒绝、不存在报 missing', () => {
     const { store } = makeStore()
     const taken = store.push('s1', '会被参考的', 'web').item
     const spare = store.push('s1', '要撤销的', 'web').item
@@ -87,9 +87,13 @@ describe('HintStore', () => {
     if (taken === null || spare === null) return
 
     store.consume('s1', 1) // 只取走最旧那条
-    expect(store.cancel(taken.id)).toBe('consumed')
-    expect(store.cancel(999)).toBe('missing')
-    expect(store.cancel(spare.id)).toBe('ok')
+    expect(store.cancel(taken.id).status).toBe('consumed')
+    expect(store.cancel(999).status).toBe('missing')
+    const cancelled = store.cancel(spare.id)
+    expect(cancelled.status).toBe('ok')
+    // 回执要能按真实会话归属广播：entry 必须带上会话与正文。
+    expect(cancelled.status === 'ok' ? cancelled.entry.sessionId : null).toBe('s1')
+    expect(cancelled.status === 'ok' ? cancelled.entry.content : null).toBe('要撤销的')
     expect(store.stats()).toEqual({ pending: 0, consumed: 1, total: 1 })
   })
 

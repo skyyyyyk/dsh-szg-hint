@@ -272,16 +272,18 @@ export class HintStore {
   /**
    * 撤销一条仍待消费的提示。
    * @param id - 提示 id。
-   * @returns `ok` 已撤销；`consumed` 已被参考（不可撤销）；`missing` 不存在。
+   * @returns `ok` 已撤销（附条目快照，供回执按真实会话归属广播）；
+   *   `consumed` 已被参考（不可撤销）；`missing` 不存在。
    */
-  cancel(id: number): 'ok' | 'consumed' | 'missing' {
+  cancel(id: number): { status: 'ok', entry: HintItem } | { status: 'consumed' } | { status: 'missing' } {
     const item = this.items.get(id)
-    if (item === undefined) return 'missing'
-    if (item.status !== 'pending') return 'consumed'
+    if (item === undefined) return { status: 'missing' }
+    if (item.status !== 'pending') return { status: 'consumed' }
+    const entry = { ...item }
     this.items.delete(id)
     this.append({ op: 'del', id })
     this.touch()
-    return 'ok'
+    return { status: 'ok', entry }
   }
 
   /**
