@@ -43,11 +43,26 @@ dsh plugin --profile web add /path/to/dsh-szg-hint
 |---|---|---|
 | `GET /dsh-szg-hint/events`（SSE） | 主通道 | 状态一变推一帧 `event: state`（完整快照，含 `revision`）；动作推一帧 `event: hint`（`added` / `consumed` / `cancelled`，供轻提示）；开通道先写注释行与 `retry`，之后每 25 秒一条 `: ping`。空闲时零流量 |
 | `GET /dsh-szg-hint/state` | 轮询兜底 | 返回**同一个**快照，供 SSE 不可用（老宿主 / 代理干扰）时降级；4 秒一次，连续失败降频到 12 秒 |
-| `POST /dsh-szg-hint` | 入队 | 同源校验；body `{ text, sessionId? }`（`sessionId` 留空 = 全局）；返回 `{ ok, hintId, running, dropped }`；`running` 说明「该会话此刻是否在跑回合」，前端据此选文案 |
+| `POST /dsh-szg-hint` | 入队 | 先过信任围栏（见下节）；body `{ text, sessionId? }`（`sessionId` 留空 = 全局）；返回 `{ ok, hintId, running, dropped }`；`running` 说明「该会话此刻是否在跑回合」，前端据此选文案 |
 | `DELETE /dsh-szg-hint`（body `{ id }`）| 撤销 | 待参考可撤；已被参考返回 409、不存在返回 404（中文原因，前端直接展示）。`DELETE /dsh-szg-hint/<id>` 是同一动作的路径形式，方便 curl |
 
 浏览器半边只有一条应用路径（`normalizeSnapshot` + 状态替换），「推来的」与「拉来的」在组件看来完全一样；
-动作帧只用于弹轻提示（按提示 id 去重，SSE 重放不会重复弹）。页面不可见时整条链路断开（不占浏览器每源连接配额）。
+动作帧只用于弹轻提示（按「动作 + 提示 id」去重，SSE 重放不会重复弹）。页面不可见时整条链路断开（不占浏览器每源连接配额）。
+
+## 信任围栏（数据面的来源校验）
+
+数据面所有路径（`state` / `events` / `POST` / `DELETE`）在分派前统一过宿主的连接信任围栏：
+取 `connection` 服务的 `requestRejection(req)`，`403`（Host 不受信）与 `401`（浏览器未认证）都按原状态码回绝，
+只有已认证的页面（带签名会话 cookie）才放行。
+
+**为什么不能只靠同源校验**：`sameOrigin` 只检查「带外站 `Origin` 的浏览器跨站请求」，
+不带 `Origin` 的本地进程（脚本、别的应用）会被直接放行——于是任何本机程序都能读走用户的提示正文与所在会话，
+也能 POST 一条提示；而提示会作为 plugin 消息进入正在执行的任务，等同于任意指令注入。来源校验必须落在服务端。
+
+- `connection` 是**硬依赖**（写在 `inject` 里），但按结构取值（`Reflect.get`）而不引入跨包类型依赖；
+  取不到该服务时每个请求回 `503` 并在 stderr 说明，而不是静默放行。
+- 浏览器半边无需改动：同源请求自带 cookie，SSE、轮询与写操作都直接通过。
+- 单独部署到「没有 `connection` 服务」的宿主时，需自行在网关层补认证，否则数据面不可用（503）。
 
 ## 注入语义
 
@@ -117,7 +132,7 @@ npm run build       # tsdown → lib/index.js（宿主）+ lib/client.js（浏�
 |---|---|---|
 | `tests/store.spec.ts` | 队列契约（12 例）：原子消费不重复、最旧优先与单步上限、会话/全局作用域、拿不到会话时只取全局、撤销三态、注入失败回滚、单会话上限与 `dropped` 报告、空白拒绝与截断、运行态信号、重启后不重复消费、坏行跳过、快照口径 | `npm test` |
 | `tests/host-runtime-probe.mjs` | 宿主接线（10 项）：ESM 可导入、导出契约（name / inject / Config / apply）、路由前缀、两个工具、两类订阅、注册全部走 `ctx.effect` | `node tests/host-runtime-probe.mjs` |
-| `tests/behavior.spec.ts` | 行为（13 例，需先 build）：真实 HTTP 数据面（入队 / 快照 / 撤销三态 / 空白与跨站拒绝）、注入语义（会话+全局合并与编号、consumed 不重复、会话隔离、拿不到会话只取全局）、**本步被下游拒绝时回滚待下一步**、并发取走不重复、积压上限与超长截断、重启不重复注入、坏行容错、模型侧工具契约 | `npm test` |
+| `tests/behavior.spec.ts` | 行为（19 例，需先 build）：真实 HTTP 数据面（入队 / 快照 / 撤销三态 / 空白与跨站拒绝）、注入语义（会话+全局合并与编号、consumed 不重复、会话隔离、拿不到会话只取全局）、**本步被下游拒绝时回滚待下一步**、并发取走不重复、积压上限与超长截断、重启不重复注入、坏行容错、模型侧工具契约，以及**信任围栏四条**（放行 / 401 拒读 / 401 拒写且不落库 / 403） | `npm test` |
 
 ## Known Limitations and Deferred Work
 
