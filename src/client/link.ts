@@ -35,14 +35,15 @@ export interface HintActionEvent extends HintEventFrame {
   seq: number
 }
 
-/** 写操作结果。 */
-export interface HintWriteResult {
-  ok: boolean
-  /** 失败原因（中文，可直接展示）。 */
-  error?: string
-  /** 服务端返回的提示 id（发送成功时）。 */
-  hintId?: number
-}
+/**
+ * 写操作结果。
+ *
+ * 判别联合：成功一定带 `hintId`（它是撤销该条提示的唯一凭证，调用方也拿它当回执
+ * 的去重键），失败一定带可展示的中文原因。宿主没回 id 的响应算失败，不当作成功。
+ */
+export type HintWriteResult =
+  | { ok: true, hintId: number }
+  | { ok: false, error: string }
 
 /** 链路的对外能力面（由 `apply` 交给组件）。 */
 export interface HintLink {
@@ -162,10 +163,12 @@ function normalizeEvent(raw: unknown): HintEventFrame | null {
   const ids = Array.isArray(rec['ids'])
     ? rec['ids'].filter((value): value is number => typeof value === 'number')
     : []
-  if (ids.length === 0) return null
+  const truncated = ids.map(value => Math.trunc(value))
+  if (truncated.length === 0) return null
   return {
     kind,
-    ids: ids.map(value => Math.trunc(value)),
+    // 首元素已在上面判非空：这里把它固化成非空元组，`ids[0]` 读起来才不需要额外收窄。
+    ids: truncated as [number, ...number[]],
     sessionId: stringOr(rec['sessionId'], ''),
     text: stringOr(rec['text'], ''),
   }
@@ -360,7 +363,14 @@ export function createHintLink(): HintLink {
    * @param failure - 兜底错误文案。
    * @returns 结果（含服务端给的中文错误）。
    */
-  const write = async (init: RequestInit, failure: string): Promise<HintWriteResult> => {
+  /**
+   * 写一次宿主接口（发提示 / 撤销）。
+   * @param init - fetch 参数。
+   * @param failure - 兜底错误文案。
+   * @param needId - 是否要求宿主返回提示 id（发送要求；撤销不需要）。
+   * @returns 结果（含服务端给的中文错误）。
+   */
+  const write = async (init: RequestInit, failure: string, needId: boolean): Promise<HintWriteResult> => {
     try {
       const response = await fetch(QUEUE_URL, init)
       const body = asRecord(await response.json().catch(() => ({})))
@@ -369,7 +379,8 @@ export function createHintLink(): HintLink {
         return { ok: false, error: error.length > 0 ? error : `${failure}（HTTP ${String(response.status)}）` }
       }
       const hintId = Math.trunc(numberOr(body['hintId'], 0))
-      return hintId > 0 ? { ok: true, hintId } : { ok: true }
+      if (needId && hintId <= 0) return { ok: false, error: '宿主没有返回提示 id' }
+      return { ok: true, hintId }
     } catch (error) {
       return { ok: false, error: `${failure}：${error instanceof Error ? error.message : String(error)}` }
     }
@@ -391,12 +402,12 @@ export function createHintLink(): HintLink {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, sessionId }),
-    }, '发送失败'),
+    }, '发送失败', true),
     cancel: (id: number) => write({
       method: 'DELETE',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id }),
-    }, '撤销失败'),
+    }, '撤销失败', false),
     dispose: (): void => {
       disposed = true
       running = false

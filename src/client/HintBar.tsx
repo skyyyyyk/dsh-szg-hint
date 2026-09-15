@@ -74,6 +74,22 @@ const TOAST_STACK_MAX = 4
 const RECENT_SHOWN = 3
 
 /**
+ * 轻提示的去重键。
+ *
+ * 必须带上动作：一条提示会先后经历入队 / 被参考 / 被撤销，这些是不同的回执；
+ * 只用提示 id 当键会让后面的回执被去重吞掉（撤销的成功与失败回执都弹不出来，
+ * 用户看不到反馈，甚至会误以为已撤销成功）。本地乐观回执与宿主 SSE 那一份
+ * 必须给同一个动作同一个键，否则同一件事会弹两次。
+ *
+ * @param action - 回执对应的动作。
+ * @param id - 提示 id。
+ * @returns 去重键。
+ */
+function toastKey(action: 'added' | 'consumed' | 'cancelled' | 'cancelFailed', id: number): string {
+  return `${action}:${String(id)}`
+}
+
+/**
  * 发送键旁的提示入口（图标按钮 + 上弹面板）。
  * @param props - 槽位标准 props（含 `sessionId`）与注入面。
  * @returns 入口元素。
@@ -91,7 +107,7 @@ export function HintBar({
   const rootRef = useRef<HTMLDivElement | null>(null)
   const draftRef = useRef<HTMLTextAreaElement | null>(null)
   const toastSeq = useRef(0)
-  const seenKeys = useRef(new Set<number>())
+  const seenKeys = useRef(new Set<string>())
   const lastEventSeq = useRef(0)
 
   const running = snapshot?.runningSessions.includes(sessionId) ?? false
@@ -108,9 +124,9 @@ export function HintBar({
    * 弹一条轻提示。
    * @param tone - 语气（决定配色）。
    * @param text - 正文。
-   * @param key - 去重键（提示 id）：同一件事只弹一次（本地已弹过 / SSE 重放都算）。
+   * @param key - 去重键（`动作:id`，见 `toastKey`）：同一件事只弹一次（本地已弹过 / 刷新后 SSE 重放都算）。
    */
-  const pushToast = useCallback((tone: Toast['tone'], text: string, key?: number) => {
+  const pushToast = useCallback((tone: Toast['tone'], text: string, key?: string) => {
     if (key !== undefined) {
       if (seenKeys.current.has(key)) return
       seenKeys.current.add(key)
@@ -164,8 +180,8 @@ export function HintBar({
     }
     setDraft('')
     setOpen(false)
-    // 本地先给回执并把 id 记进去重表：随后到达的 `added` 帧不会再弹一次。
-    pushToast('ok', running ? '💡 提示已发送，AI 将在下一步参考' : '💡 提示已保存，将在下个任务开始时参考', result.hintId)
+    // 本地先给回执并把 `added` 键记进去重表：随后到达的 `added` 帧不会再弹一次。
+    pushToast('ok', running ? '💡 提示已发送，AI 将在下一步参考' : '💡 提示已保存，将在下个任务开始时参考', toastKey('added', result.hintId))
   }
 
   /**
@@ -175,10 +191,10 @@ export function HintBar({
   const cancel = async (id: number): Promise<void> => {
     const result = await hintCancel(id)
     if (!result.ok) {
-      pushToast('err', `❌ ${result.error ?? '撤销失败'}`, id)
+      pushToast('err', `❌ ${result.error ?? '撤销失败'}`, toastKey('cancelFailed', id))
       return
     }
-    pushToast('warn', '已撤销这条提示', id)
+    pushToast('warn', '已撤销这条提示', toastKey('cancelled', id))
   }
 
   const title = running
@@ -338,19 +354,18 @@ function applyHintEvent(
   event: HintActionEvent,
   sessionId: string,
   running: boolean,
-  pushToast: (tone: Toast['tone'], text: string, key?: number) => void,
+  pushToast: (tone: Toast['tone'], text: string, key?: string) => void,
 ): void {
   const mine = event.sessionId === sessionId || event.sessionId.length === 0
   if (!mine) return
-  const key = event.ids[0]
   if (event.kind === 'added') {
-    pushToast('ok', running ? '💡 提示已入队，AI 将在下一步参考' : '💡 提示已入队，将在下个任务开始时参考', key)
+    pushToast('ok', running ? '💡 提示已入队，AI 将在下一步参考' : '💡 提示已入队，将在下个任务开始时参考', toastKey('added', event.ids[0]))
     return
   }
   if (event.kind === 'consumed') {
     const suffix = event.text.length > 0 ? `：${event.text}` : ''
-    pushToast('ok', `💡 AI 已参考你的提示${suffix}`, key)
+    pushToast('ok', `💡 AI 已参考你的提示${suffix}`, toastKey('consumed', event.ids[0]))
     return
   }
-  pushToast('warn', '已撤销提示', key)
+  pushToast('warn', '已撤销提示', toastKey('cancelled', event.ids[0]))
 }

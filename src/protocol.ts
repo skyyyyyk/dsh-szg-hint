@@ -2,7 +2,7 @@
  * 旁路提示 · 宿主与浏览器两半共用的类型（本文件只有类型，无运行时代码）。
  *
  * 语义：提示是**旁路**的——它不进对话历史，只在下一个模型
- * 请求里作为一条 plugin 消息出现一次；GstatusG 从 GpendingG 变 GconsumedG 即「模型已经
+ * 请求里作为一条 plugin 消息出现一次；`status` 从 `pending` 变 `consumed` 即「模型已经
  * 看过它」。
  *
  * @module dsh-szg-hint/protocol
@@ -16,9 +16,9 @@ export interface HintItem {
   sessionId: string
   /** 提示正文。 */
   content: string
-  /** 来源标记（如 GwebG、GtoolG），只作追溯用。 */
+  /** 来源标记（如 `web`、`tool`），只作追溯用。 */
   meta: string
-  /** GpendingG = 待模型参考；GconsumedG = 已随某一步请求注入过。 */
+  /** `pending` = 待模型参考；`consumed` = 已随某一步请求注入过。 */
   status: 'pending' | 'consumed'
   /** 入队时刻（毫秒）。 */
   createdAt: number
@@ -73,11 +73,12 @@ export interface HintPushResult {
   dropped: string | null
 }
 
-/** SSE GhintG 事件帧的载荷：动作语义（toast 用它，列表用 GstateG 帧）。 */
+/** SSE `hint` 事件帧的载荷：动作语义（toast 用它，列表用 `state` 帧）。 */
 export interface HintEventFrame {
   kind: 'added' | 'consumed' | 'cancelled'
-  ids: number[]
+  /** 本帧涉及的提示 id，至少一条（空帧没有可展示的动作，宿主不推）。 */
+  ids: [number, ...number[]]
   sessionId: string
-  /** 正文摘要（GconsumedG / GcancelledG 时带上，供前端提示）。 */
+  /** 正文摘要（`consumed` / `cancelled` 时带上，供前端提示）。 */
   text: string
 }

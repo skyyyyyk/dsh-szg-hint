@@ -23,14 +23,14 @@ import { defineConfig, type UserConfig } from 'tsdown'
 const PLUGIN_ID = 'dsh-szg-hint'
 
 /** 运行时由 dsh 宿主进程 / 浏览器模块表提供的包名。 */
-const HOST_EXTERNALS: readonly (string | RegExp)[] = [
+const HOST_EXTERNALS: (string | RegExp)[] = [
   /^@deepseek-ai\//,
   /^schemastery(\/|$)/,
   /^node:/,
 ]
 
 /** 模块表基线里的浏览器侧 specifier。 */
-const CLIENT_EXTERNALS: readonly (string | RegExp)[] = [
+const CLIENT_EXTERNALS: (string | RegExp)[] = [
   'react',
   'react/jsx-runtime',
   'react-dom',
@@ -81,7 +81,9 @@ const cssModules = {
   async load(virtualId: string) {
     if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
     const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
-    this.addWatchFile(fileId)
+    // rolldown 的插件上下文提供 addWatchFile（CSS 改动要能触发重建），但 tsdown 暴露的
+    // 钩子 this 类型里没有它，故按结构取用；缺席时跳过watch（构建仍然正确，只是不增量）。
+    ;(this as unknown as { addWatchFile?: (file: string) => void }).addWatchFile?.(fileId)
     const source = await readFile(fileId)
     const { code, exports: cssExports } = transform({
       filename: fileId,

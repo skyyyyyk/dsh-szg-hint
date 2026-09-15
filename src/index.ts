@@ -521,7 +521,9 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => () => hub.dispose(), 'szg-hint:hub')
 
   // ── 数据面路由 ──
-  const webServer = ctx.webServer as unknown as WebServerLike | undefined
+  // 独立仓库不带宿主的 Context 类型增强，`ctx.webServer` 只能按结构断言取值；
+  // 形状由上面的 WebServerLike 约束，缺席时得到 undefined 并走下面的降级分支。
+  const webServer = (ctx as unknown as { webServer: WebServerLike | undefined }).webServer
   if (webServer === undefined) {
     // 硬依赖成立时不该发生；真发生就明说，别再静默退化成「页面有提示栏却全部 404」。
     process.stderr.write('[dsh-szg-hint] webServer 服务缺席，数据面路由未注册\n')
@@ -600,11 +602,13 @@ export function apply(ctx: Context, config: Config): void {
       process.stderr.write(`[dsh-szg-hint] 注入构造失败（已回滚 ${String(restored)} 条）：${String(error)}\n`)
       return decision
     }
+    const first = taken[0] as HintItem
     hub.announce({
       kind: 'consumed',
-      ids: taken.map(item => item.id),
-      sessionId: taken[0]?.sessionId ?? '',
-      text: taken[0]?.content.slice(0, 80) ?? '',
+      // 上面已判过 `taken` 非空，但 narrowing 不跨异步边界；首元素单独取出后类型即可收窄。
+      ids: [first.id, ...taken.slice(1).map(item => item.id)],
+      sessionId: first.sessionId,
+      text: first.content.slice(0, 80),
     })
     const messages = decision.messages ?? []
     return { ...decision, messages: [...messages, message] }
