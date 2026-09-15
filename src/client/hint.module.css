@@ -1,0 +1,310 @@
+/*
+ * 旁路提示 · 样式与浏览器半边）。
+ *
+ * 形态：工具行右侧的 28px 圆形图标按钮与与左侧 `+` 控件同规格），点开向上弹面板。
+ * 配色全部走 dsh 主题 token与`--dsw-alias-*`，见 packages/client/ui-theme/src/styles/），
+ * 跟随明暗主题；token 缺失时对应声明自然失效与文字退回继承色、背景透明），不写字面色。
+ * 尺寸对齐官方 composer：工具行控件 28px、发送键 34px、卡片圆角 22px、控件圆角 999px。
+ */
+
+.root {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* 与 `.add`与左侧 + 圆钮）同规格：28px 圆、无边框、透明底。 */
+.trigger {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.trigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 运行中：图标点亮为品牌色，底色一层淡淡的光与「随时可以插话」的信号）。 */
+.triggerLive {
+  color: var(--dsw-alias-brand-primary);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);
+}
+
+.triggerLive:hover {
+  color: var(--dsw-alias-brand-primary);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 22%, transparent);
+}
+
+.triggerOpen {
+  color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-interactive-bg-hover-accent);
+}
+
+/* 待参考计数：右上角角标，描一圈卡片底色把它从图标上「切」出来。 */
+.badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--dsw-specific-input-major);
+}
+
+/* 面板：锚在按钮上方向上弹出、右边缘对齐与按钮本就在工具行右侧）。 */
+.panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, 92vw);
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-overlay);
+  box-shadow: 0 12px 32px var(--dsw-alias-bg-mask-drop);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: default;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.title {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.meta {
+  flex: 1;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 62px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  line-height: 1.55;
+}
+
+.input::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.send {
+  flex: none;
+  padding: 5px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--dsw-alias-button-info-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 100ms ease, opacity 100ms ease;
+}
+
+.send:hover:not(:disabled) {
+  background: var(--dsw-alias-button-info-hover);
+}
+
+.send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.actionsNote {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.listTitle {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-mask-1);
+}
+
+.itemDone {
+  opacity: 0.7;
+}
+
+.itemText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.itemAction {
+  flex: none;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.itemAction:hover {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.itemMark {
+  flex: none;
+  color: var(--dsw-alias-state-success-primary);
+  font-size: 11px;
+}
+
+.empty {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.foot {
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+}
+
+/* 轻提示：视口右上角堆叠，不占会话流与与 szg 的 toast 栈同语义）。 */
+.toasts {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-overlay);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: 0 10px 26px var(--dsw-alias-bg-mask-drop);
+  animation: hint-toast-in 0.18s ease-out;
+}
+
+.toastOk {
+  border-left: 3px solid var(--dsw-alias-state-success-primary);
+}
+
+.toastWarn {
+  border-left: 3px solid var(--dsw-alias-state-warn-primary);
+}
+
+.toastErr {
+  border-left: 3px solid var(--dsw-alias-state-error-primary);
+}
+
+.toastIcon {
+  font-size: 13px;
+}
+
+.toastText {
+  flex: 1;
+  word-break: break-word;
+}
+
+@keyframes hint-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

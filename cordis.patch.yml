@@ -1,0 +1,7 @@
+# dsh-szg-hint 组合层：把插件行插进任何 profile。
+#
+# 插件行按**包名**引用本包（官方 publish 指南：Node 的模块解析才能找到已安装的代码）。
+# 配置键全部可省——`dshHome` 留空时依次取 `DSH_HOME`、`~/.dsh`。
+- insert:
+    - id: dsh-szg-hint
+      name: dsh-szg-hint
