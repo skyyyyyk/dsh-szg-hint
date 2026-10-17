@@ -23,6 +23,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname } from 'node:path'
 import type {
   HintConsumedView,
+  HintImageRef,
   HintItem,
   HintPendingView,
   HintPushResult,
@@ -56,6 +57,52 @@ export const DEFAULT_STORE_OPTIONS: HintStoreOptions = {
 type HintLogLine =
   | { op: 'put'; item: HintItem }
   | { op: 'del'; id: number }
+
+/**
+ * 把一行日志里的条目收窄成当前形状。
+ *
+ * 老日志（本插件还没有图片能力时写的行）没有 `images` 字段，直接读会让下游到处判 undefined；
+ * 这里统一补成空数组，**只做形状补齐、不做业务判断**：坏字段一律当「没有」。
+ * @param raw - 日志里反序列化出来的条目。
+ * @returns 补全后的条目；`id` 不合法时返回 null（该行作废）。
+ */
+function reviveItem(raw: unknown): HintItem | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const rec = raw as Record<string, unknown>
+  const id = rec['id']
+  if (typeof id !== 'number' || !Number.isFinite(id)) return null
+  const images = Array.isArray(rec['images'])
+    ? rec['images'].filter((value): value is HintImageRef => {
+      const image = value as Record<string, unknown> | null
+      return typeof image === 'object' && image !== null
+        && typeof image['attachmentId'] === 'string' && image['attachmentId'].length > 0
+        && typeof image['mediaType'] === 'string'
+    })
+    : []
+  return {
+    id,
+    sessionId: typeof rec['sessionId'] === 'string' ? rec['sessionId'] : '',
+    content: typeof rec['content'] === 'string' ? rec['content'] : '',
+    images,
+    meta: typeof rec['meta'] === 'string' ? rec['meta'] : '',
+    status: rec['status'] === 'consumed' ? 'consumed' : 'pending',
+    createdAt: typeof rec['createdAt'] === 'number' ? rec['createdAt'] : 0,
+    consumedAt: typeof rec['consumedAt'] === 'number' ? rec['consumedAt'] : null,
+  }
+}
+
+/**
+ * 一条提示的一句话摘要（列表、回执、`dropped` 报告共用）。
+ * @param item - 条目或其投影。
+ * @returns 正文前 40 字；纯图提示给「（图片 ×N）」。
+ */
+export function summarizeHint(item: { content: string, images?: readonly HintImageRef[] }): string {
+  const text = item.content.trim()
+  if (text.length > 0) return text.slice(0, 40)
+  const count = item.images?.length ?? 0
+  return count > 0 ? `（图片 ×${String(count)}）` : ''
+}
+
 
 /**
  * 旁路提示队列。
@@ -123,9 +170,12 @@ export class HintStore {
             this.items.delete(parsed.id)
             continue
           }
-          if (parsed.op === 'put' && typeof parsed.item?.id === 'number') {
-            this.items.set(parsed.item.id, parsed.item)
-            if (parsed.item.id >= this.nextId) this.nextId = parsed.item.id + 1
+          if (parsed.op === 'put') {
+            const item = reviveItem(parsed.item)
+            if (item !== null) {
+              this.items.set(item.id, item)
+              if (item.id >= this.nextId) this.nextId = item.id + 1
+            }
           }
         } catch {
           // 坏行（截断写入/手工改坏）：跳过即可，后面每次变更都会追加新行。
@@ -189,14 +239,21 @@ export class HintStore {
 
   /**
    * 入队一条提示。
+   *
+   * **正文与附图至少要有一样**：纯图提示（只发一张截图、不打字）是合法输入，
+   * 此时正文存空串，注入时渲染成「（无文字说明，见附图）」，模型不会看到一条空气泡。
    * @param sessionId - 归属会话；空串 = 全局。
-   * @param content - 提示正文；空白内容拒绝入队。
+   * @param content - 提示正文；与 `images` 同时为空时拒绝入队。
    * @param meta - 来源标记（如 `web` / `tool`）。
-   * @returns 入队结果（正文为空时 `item` 为 null）。
+   * @param images - 已落库的图片引用（准入与限额在路由层完成）。
+   * @returns 入队结果（正文与附图都为空时 `item` 为 null）。
    */
-  push(sessionId: string, content: string, meta: string): HintPushResult {
+  push(sessionId: string, content: string, meta: string, images: readonly HintImageRef[] = []): HintPushResult {
     const text = (content ?? '').trim().slice(0, this.options.maxContentChars)
-    if (text.length === 0) return { item: null, running: this.isRunning(sessionId), dropped: null }
+    const refs = images.map(image => ({ ...image }))
+    if (text.length === 0 && refs.length === 0) {
+      return { item: null, running: this.isRunning(sessionId), dropped: null }
+    }
     const scope = String(sessionId ?? '')
     let dropped: string | null = null
     const own = [...this.items.values()]
@@ -204,7 +261,7 @@ export class HintStore {
     if (own.length >= this.options.maxPendingPerSession) {
       const oldest = own.sort((left, right) => left.id - right.id)[0]
       if (oldest !== undefined) {
-        dropped = oldest.content.slice(0, 40)
+        dropped = summarizeHint(oldest)
         this.items.delete(oldest.id)
         this.append({ op: 'del', id: oldest.id })
       }
@@ -213,6 +270,7 @@ export class HintStore {
       id: this.nextId,
       sessionId: scope,
       content: text,
+      images: refs,
       meta: (meta ?? '').slice(0, 200),
       status: 'pending',
       createdAt: Date.now(),
@@ -334,6 +392,19 @@ export class HintStore {
   }
 
   /**
+   * 某条提示的第 n 张附图（图片路由按 id + 序号取图，**不按 attachmentId 暴露**：
+   * 否则这个路由就变成了「按内容哈希读附件库」的通用出口）。
+   * @param id - 提示 id。
+   * @param index - 图序号（从 0 开始）。
+   * @returns 图片引用；条目不存在或序号越界返回 undefined。
+   */
+  imageAt(id: number, index: number): HintImageRef | undefined {
+    const item = this.items.get(id)
+    if (item === undefined) return undefined
+    return item.images[index]
+  }
+
+  /**
    * 最近的已消费提示。
    * @param limit - 条数上限。
    * @returns 最新的在前。
@@ -347,6 +418,7 @@ export class HintStore {
         id: item.id,
         sessionId: item.sessionId,
         text: item.content.slice(0, 80),
+        imageCount: item.images.length,
         consumedAt: item.consumedAt ?? 0,
       }))
   }
@@ -364,9 +436,12 @@ export class HintStore {
 
   /**
    * 当前全量快照。
+   *
+   * `imageLimits` 不在队列里（它属于插件配置），由调用方在组装快照时补上；
+   * 这里给一个「未启用」的保守默认，保证任何调用路径拿到的对象都是完整形状。
    * @returns 快照（SSE 帧与轮询响应同形）。
    */
-  snapshot(): HintSnapshot {
+  snapshot(imageLimits: HintSnapshot['imageLimits'] = DISABLED_IMAGE_LIMITS): HintSnapshot {
     const pending: HintPendingView[] = [...this.items.values()]
       .filter(item => item.status === 'pending')
       .sort((left, right) => left.id - right.id)
@@ -375,6 +450,7 @@ export class HintStore {
         id: item.id,
         sessionId: item.sessionId,
         content: item.content,
+        images: item.images.map(image => ({ ...image })),
         createdAt: item.createdAt,
       }))
     return {
@@ -385,6 +461,16 @@ export class HintStore {
       recentConsumed: this.recentConsumed(this.options.keepConsumed),
       stats: this.stats(),
       maxContentChars: this.options.maxContentChars,
+      imageLimits,
     }
   }
+}
+
+/** 附件服务缺席时的图片限额（前端据此隐藏附图入口）。 */
+export const DISABLED_IMAGE_LIMITS: HintSnapshot['imageLimits'] = {
+  enabled: false,
+  maxImages: 0,
+  maxImageBytes: 0,
+  maxTotalBytes: 0,
+  mediaTypes: [],
 }

@@ -1,7 +1,7 @@
 {
   "name": "dsh-szg-hint",
-  "version": "0.1.0",
-  "description": "DeepSeek Harness plugin: drop a hint into a running task and the agent picks it up at its next step — without interrupting it and without polluting the chat history. · 旁路提示：任务执行中插一句话，AI 下一步即刻参考。",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness plugin: drop a hint into a running task and the agent picks it up at its next step — without interrupting it and without polluting the chat history. Hints can carry screenshots/images. · 旁路提示：任务执行中插一句话（可附图），AI 下一步即刻参考。",
   "type": "module",
   "license": "MIT",
   "author": {
@@ -68,20 +68,26 @@
   "scripts": {
     "build": "tsdown && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "pnpm run build && vitest run",
     "test:probe": "node tests/host-runtime-probe.mjs",
     "test:artifact": "node tests/artifact-check.mjs",
     "test:all": "npm run test && npm run test:probe && npm run test:artifact",
     "prepare": "tsdown && tsc -p tsconfig.build.json"
   },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
+    "react": "^18.2.0"
+  },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-session": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4",
     "@types/node": "^26.0.0",
     "@types/react": "^18.3.0",
     "lightningcss": "^1.32.0",

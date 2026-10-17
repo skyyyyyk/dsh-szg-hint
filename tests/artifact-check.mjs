@@ -57,7 +57,20 @@ check('宿主路由前缀带前导斜杠',
 check('宿主事件/状态路径由前缀派生',
   host.includes('const EVENTS_PATH = `${ROUTE_PREFIX}/events`') && host.includes('const STATE_PATH = `${ROUTE_PREFIX}/state`'),
   [first(host, 'const EVENTS_PATH = [^;]+'), first(host, 'const STATE_PATH = [^;]+')])
+// 取图路由（`/dsh-szg-hint/image/<id>/<n>`）同样必须由前缀派生：写成字面量就会在改前缀时
+// 与状态/事件路径分叉，而这条分叉只会在浏览器取缩略图时以 404 暴露。这里不把反引号内容
+// 写死成普通字符串——按「抽出来看它引用的是谁」判定，前缀换了也不用改这条断言。
+const imagePathPrefix = first(host, 'const IMAGE_PATH_PREFIX = [^;]+')
+check('宿主取图路由由前缀派生',
+  imagePathPrefix !== undefined && imagePathPrefix.includes('/image/') && imagePathPrefix.includes('ROUTE_PREFIX'),
+  imagePathPrefix)
 check('宿主两个工具在场', host.includes('"hint_send"') && host.includes('"hint_status"'))
+// 图片链路的三个配置键要在产物里真的存在：漏一个，用户改了配置也会静默走默认值
+// （schemastery 不认识的键不会报错，只在行为上表现为「设了没用」）。
+const imageConfigKeys = ['maxImagesPerHint', 'maxImageBytes', 'maxTotalImageBytes']
+const missingImageKeys = imageConfigKeys.filter(key => !host.includes(key))
+check('宿主图片限额配置键在场', missingImageKeys.length === 0,
+  missingImageKeys.length > 0 ? { missing: missingImageKeys } : imageConfigKeys.join(' / '))
 check('宿主依赖外部化（官方包未内联）',
   host.includes('@deepseek-ai/dsh-tools') && host.includes('@deepseek-ai/dsh-llm') && host.includes('@deepseek-ai/schemastery'))
 const dataDir = first(host, '[^"`]+hints\\.jsonl')
@@ -78,6 +91,12 @@ const queueUrl = first(client, 'const QUEUE_URL = "[^"]+"')
 check('客户端前缀常量存在', queueUrl !== undefined && queueUrl.includes('/dsh-szg-hint'), queueUrl)
 check('客户端事件/状态路径由前缀派生',
   /`\$\{QUEUE_URL\}\/events`/.test(client) && /`\$\{QUEUE_URL\}\/state`/.test(client))
+// 取图路径与宿主同前缀。单看 `includes('/dsh-szg-hint/image/')` 会被上面那段文档注释蒙过去
+// （注释里也写了一次同样的字符串），所以钉**代码里的模板字面量形态**：`/dsh-szg-hint/image/${...}`。
+const clientImageUrlHead = '`/dsh-szg-hint/image/${'
+check('客户端取图路径与宿主同前缀',
+  client.includes(clientImageUrlHead) && client.includes('/dsh-szg-hint/image/'),
+  first(client, '`/dsh-szg-hint/image/[^`]*`'))
 const rawPaths = uniq([...client.matchAll(/['"](\/[A-Za-z0-9_\-/]*)['"]/g)].map(m => m[1])).filter(p => p.includes('hint'))
 check('客户端不含硬编码的路径字面量（避免与宿主漂移）',
   rawPaths.every(p => p === '/dsh-szg-hint'), rawPaths)
@@ -96,6 +115,21 @@ const declaredEntries = uniq([
 const missingEntries = declaredEntries.filter(entry => !existsSync(join(repo, entry)))
 check('package.json 声明的入口文件全部存在', missingEntries.length === 0,
   missingEntries.length > 0 ? { missing: missingEntries } : `${String(declaredEntries.length)} 个入口`)
+
+// 组合层（cordis.patch.yml）是 `dsh plugin add` 真正读取的挂载声明：id/name 写错时
+// package.json 与产物全都正确，但插件根本不会被装载，而且不会有人报错。
+const patchRef = manifest.dsh?.bundle?.patch
+check('dsh.bundle.patch 指向存在的文件',
+  typeof patchRef === 'string' && existsSync(join(repo, patchRef)), patchRef)
+if (typeof patchRef === 'string' && existsSync(join(repo, patchRef))) {
+  const patchLines = readFileSync(join(repo, patchRef), 'utf8').split('\n').map(line => line.trim())
+  check('cordis.patch.yml 的 id/name 与包名一致',
+    patchLines.includes(`- id: ${manifest.name}`) && patchLines.includes(`name: ${manifest.name}`),
+    {
+      id: patchLines.find(line => line.startsWith('- id:')),
+      name: patchLines.find(line => /^name:/.test(line)),
+    })
+}
 
 // ── 双语 README（对齐 dsh 的双语对等规范：两侧同等权威，默认中文）──
 // 三项合起来才构成「双语」这一约束：两侧都在、顶部互链、且内容与 README.i18n.yaml 的记录一致。

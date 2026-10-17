@@ -21,6 +21,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { HintImageUpload } from '../protocol.ts'
 import { HintBar, type HintBarInjected } from './HintBar.tsx'
 import { createHintLink } from './link.ts'
 
@@ -64,7 +65,7 @@ export function apply(ctx: Context): void {
       label: '旁路提示',
       inject: (sessionId: string): HintBarInjected => ({
         hooks: { hintState: link.state },
-        hintSend: (text: string) => link.send(text, sessionId),
+        hintSend: (text: string, images: readonly HintImageUpload[]) => link.send(text, sessionId, images),
         hintCancel: (id: number) => link.cancel(id),
       }),
     },

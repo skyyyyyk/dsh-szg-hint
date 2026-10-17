@@ -14,7 +14,7 @@
  * @module dsh-szg-hint/client/link
  */
 
-import type { HintEventFrame, HintSnapshot } from '../protocol.ts'
+import type { HintEventFrame, HintImageLimits, HintImageRef, HintImageUpload, HintSnapshot } from '../protocol.ts'
 
 /** 通道形态：连接中 / SSE / 轮询 / 页面不可见暂停 / 已释放。 */
 export type HintTransport = 'connecting' | 'sse' | 'poll' | 'paused' | 'offline'
@@ -52,15 +52,15 @@ export interface HintLink {
     getSnapshot(): HintLinkState
     subscribe(listener: () => void): () => void
   }
-  /** 发一条提示。 */
-  send(text: string, sessionId: string): Promise<HintWriteResult>
+  /** 发一条提示（可带附图）。 */
+  send(text: string, sessionId: string, images?: readonly HintImageUpload[]): Promise<HintWriteResult>
   /** 撤销一条待消费的提示。 */
   cancel(id: number): Promise<HintWriteResult>
   /** 释放连接与全部计时器。 */
   dispose(): void
 }
 
-/** 与宿主半边同一个路径前缀（`src/index.ts` 的 `ROUTE_PREFIX`），改一处必须两边同步。 */
+/** 数据面根（浏览器侧唯一前缀常量；事件/状态路径都由它派生，避免与宿主漂移）。 */
 const QUEUE_URL = '/dsh-szg-hint'
 const EVENTS_URL = `${QUEUE_URL}/events`
 const STATE_URL = `${QUEUE_URL}/state`
@@ -103,6 +103,59 @@ function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback
 }
 
+/** 附件服务缺席时的图片限额（老宿主也走这一支：没有这个字段 = 不支持图片）。 */
+const NO_IMAGE_LIMITS: HintImageLimits = {
+  enabled: false,
+  maxImages: 0,
+  maxImageBytes: 0,
+  maxTotalBytes: 0,
+  mediaTypes: [],
+}
+
+/**
+ * 收窄一张附图引用（形状不合就丢掉——列表宁可少画一张缩略图，也不能整帧作废）。
+ * @param raw - 待收窄的值。
+ * @returns 引用；字段不合时返回 null。
+ */
+function normalizeImageRef(raw: unknown): HintImageRef | null {
+  const row = asRecord(raw)
+  const attachmentId = stringOr(row['attachmentId'], '')
+  const mediaType = stringOr(row['mediaType'], '')
+  if (attachmentId.length === 0 || mediaType.length === 0) return null
+  const name = typeof row['name'] === 'string' && row['name'].length > 0 ? row['name'] : undefined
+  return {
+    attachmentId,
+    mediaType: mediaType as HintImageRef['mediaType'],
+    bytes: Math.max(0, Math.trunc(numberOr(row['bytes'], 0))),
+    width: Math.max(0, Math.trunc(numberOr(row['width'], 0))),
+    height: Math.max(0, Math.trunc(numberOr(row['height'], 0))),
+    ...name === undefined ? {} : { name },
+  }
+}
+
+/**
+ * 收窄图片限额。
+ * @param raw - 快照里的 `imageLimits`。
+ * @returns 限额；缺失或形状不合时按「不可用」处理（前端因此隐藏附图入口，而不是报错）。
+ */
+function normalizeImageLimits(raw: unknown): HintImageLimits {
+  const rec = asRecord(raw)
+  if (rec['enabled'] !== true) return NO_IMAGE_LIMITS
+  const mediaTypes = Array.isArray(rec['mediaTypes'])
+    ? rec['mediaTypes'].filter((value): value is string => typeof value === 'string')
+    : []
+  const maxImages = Math.max(0, Math.trunc(numberOr(rec['maxImages'], 0)))
+  const maxImageBytes = Math.max(0, Math.trunc(numberOr(rec['maxImageBytes'], 0)))
+  if (mediaTypes.length === 0 || maxImages === 0 || maxImageBytes === 0) return NO_IMAGE_LIMITS
+  return {
+    enabled: true,
+    maxImages,
+    maxImageBytes,
+    maxTotalBytes: Math.max(0, Math.trunc(numberOr(rec['maxTotalBytes'], 0))),
+    mediaTypes: mediaTypes as HintImageLimits['mediaTypes'],
+  }
+}
+
 /**
  * 把宿主响应收窄成快照。字段逐个兜底：老宿主的快照缺字段时用中性默认值，绝不整体丢弃。
  *
@@ -130,6 +183,9 @@ export function normalizeSnapshot(raw: unknown): HintSnapshot | null {
         id: Math.trunc(numberOr(row['id'], 0)),
         sessionId: stringOr(row['sessionId'], ''),
         content: stringOr(row['content'], ''),
+        images: Array.isArray(row['images'])
+          ? row['images'].map(normalizeImageRef).filter((image): image is HintImageRef => image !== null)
+          : [],
         createdAt: numberOr(row['createdAt'], 0),
       }
     }).filter(item => item.id > 0),
@@ -139,6 +195,7 @@ export function normalizeSnapshot(raw: unknown): HintSnapshot | null {
         id: Math.trunc(numberOr(row['id'], 0)),
         sessionId: stringOr(row['sessionId'], ''),
         text: stringOr(row['text'], ''),
+        imageCount: Math.max(0, Math.trunc(numberOr(row['imageCount'], 0))),
         consumedAt: numberOr(row['consumedAt'], 0),
       }
     }).filter(item => item.id > 0),
@@ -148,6 +205,7 @@ export function normalizeSnapshot(raw: unknown): HintSnapshot | null {
       total: Math.max(0, Math.trunc(numberOr(stats['total'], 0))),
     },
     maxContentChars: Math.max(1, Math.trunc(numberOr(rec['maxContentChars'], 2000))),
+    imageLimits: normalizeImageLimits(rec['imageLimits']),
   }
 }
 
@@ -171,6 +229,7 @@ function normalizeEvent(raw: unknown): HintEventFrame | null {
     ids: truncated as [number, ...number[]],
     sessionId: stringOr(rec['sessionId'], ''),
     text: stringOr(rec['text'], ''),
+    imageCount: Math.max(0, Math.trunc(numberOr(rec['imageCount'], 0))),
   }
 }
 
@@ -398,10 +457,10 @@ export function createHintLink(): HintLink {
         }
       },
     },
-    send: (text: string, sessionId: string) => write({
+    send: (text: string, sessionId: string, images: readonly HintImageUpload[] = []) => write({
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text, sessionId }),
+      body: JSON.stringify(images.length === 0 ? { text, sessionId } : { text, sessionId, images }),
     }, '发送失败', true),
     cancel: (id: number) => write({
       method: 'DELETE',

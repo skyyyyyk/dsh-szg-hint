@@ -21,7 +21,8 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          # 与本地生成 lockfile 的工具链对齐（lockfileVersion 9.0；pnpm 11 生成）。
+          version: 11
 
       - uses: actions/setup-node@v4
         with:

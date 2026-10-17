@@ -1,22 +1,28 @@
 /**
  * 行为测试：把插件当成真实宿主在跑，而不是只查接线。
  *
- * 覆盖三条链路，都是插件对外承诺的语义：
- *  1. **数据面**——起一个真实 HTTP 服务，走 `GET /dsh-szg-hint/state`、`POST`、`DELETE`；
+ * 覆盖四条链路，都是插件对外承诺的语义：
+ *  1. **数据面**——起一个真实 HTTP 服务，走 `GET /dsh-szg-hint/state`、`POST`、`DELETE`、`GET /dsh-szg-hint/image/<id>/<n>`；
  *  2. **注入路径**——直接调用插件注册的 `agent/pre-step` 监听器，传真 payload、假 `next()`，
- *     检查它到底往这一步塞了什么（含被拒绝时不得吞提示的回归）；
- *  3. **工具面**——模型侧 `hint_send` / `hint_status` 的契约（参数说明是模型填参依据）。
+ *     检查它到底往这一步塞了什么（含被拒绝时不得吞提示的回归、以及带图时真的塞了 image 块）；
+ *  3. **工具面**——模型侧 `hint_send` / `hint_status` 的契约（参数说明是模型填参依据）；
+ *  4. **图片面**——准入限额、纯图提示、按「提示 id + 序号」取图、附件服务缺席时的降级。
  *
- * 依赖 `lib/`（`npm test` 前会先 build）：产物缺失时整个文件跳过并说明原因，而不是误报失败。
+ * 装载的是 **`lib/index.js`（构建产物）而不是 `src/index.ts`（源码）**：独立仓库对外发布的
+ * 就是这份产物（`package.json` 的 `exports["."].default` 指向 `lib/index.js`），`npm test`
+ * 也已经串好「先 build 再跑」，所以这里测的正是用户装进宿主的那一份。产物缺失时整块跳过并
+ * 提示先 build，而不是误报失败。浏览器半边是 `lib/client.js`，它的验证在真机页面上做。
  */
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, get as httpGet } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createFakeAttachments, tinyPng, type FakeAttachments } from './fake-attachments.ts'
 
 const LIB = join(import.meta.dirname, '..', 'lib', 'index.js')
-const BUILD_HINT = '缺 lib/index.js：先跑 `npm run build` 再跑测试（或直接 `npm test`，它已串好顺序）'
+/** 产物缺失时的提示：本仓库的 test 脚本不串 build，直接跑 vitest 时用它告诉人该先做什么。 */
+const BUILD_HINT = '缺 lib/index.js：先跑 `pnpm run build` 再跑测试'
 
 process.env['DSH_HOME'] = mkdtempSync(join(tmpdir(), 'dsh-szg-hint-behavior-'))
 
@@ -33,19 +39,47 @@ interface Captured {
   listeners: Map<string, (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>>
   /** 信任围栏的返回：未设=放行；401/403=模拟未认证 / Host 不受信。 */
   rejection?: 401 | 403 | undefined
+  /** 附件服务替身；传 `null` 表示「宿主没有这个服务」。 */
+  attachments: FakeAttachments | null
+  /** 模型服务替身：给 `inputModalities` 用来验「模型吃不吃图」的兜底分支。 */
+  modalities: readonly string[] | undefined
+  /**
+   * 模拟「附件服务**晚于**插件 apply 挂载」：把服务塞进宿主 stub。
+   * 真实宿主里服务挂载顺序不保证（`webServer` 那条实测教训），插件必须能就地升级。
+   */
+  lateAttach: (value: FakeAttachments) => void
 }
 
 /** 按插件真实调用顺序捕获贡献（结构与 `tests/host-runtime-probe.mjs` 对齐）。 */
 function bootPlugin(
-  plugin: { apply: (ctx: unknown, config: unknown) => void, Config: (input: object) => unknown },
+  plugin: {
+    apply: (ctx: unknown, config: unknown) => void
+    Config: (input: object) => unknown
+    /** 声明的硬依赖；未声明却按属性取值的服务会被下面的 ctx 代理抛错。 */
+    inject?: readonly string[]
+  },
   rejection?: 401 | 403 | undefined,
+  options: { attachments?: FakeAttachments | null, modalities?: readonly string[] } = {},
 ): Captured {
-  const captured: Captured = { routes: [], tools: new Map(), listeners: new Map() }
+  const captured: Captured = {
+    routes: [],
+    tools: new Map(),
+    listeners: new Map(),
+    attachments: options.attachments === undefined ? createFakeAttachments() : options.attachments,
+    modalities: options.modalities,
+    lateAttach: () => {},
+  }
   // `connection` 是数据面的认证闸门：宿主 stub 必须提供它，否则每个请求都会走
   // 「缺少 connection 服务」分支拿 503。默认放行；传 rejection 时模拟未认证 / Host 不受信。
   captured.rejection = rejection
-  const ctx = {
-    get: (name: string) => (name === 'webServer' ? ctx.webServer : undefined),
+  const raw: Record<string, unknown> = {
+    // ★`get` 必须能取出**软依赖**：真实 cordis 里 `attachments` / `llm` 不在 inject 里，
+    // 只能由 `ctx.get()` 取（属性取值会抛 `cannot get property "X" without inject`）。
+    // 这个 stub 曾经只认 `webServer`，于是「插件用属性取值拿 attachments」这条真缺陷
+    // 在测试里被静默放行、到宿主里才变成「加载失败」（2026-10-15 实测事故）。
+    get: (name: string) => (name === 'webServer' || name === 'attachments' || name === 'llm' || name === 'connection'
+      ? raw[name]
+      : undefined),
     effect: (cb: () => unknown) => { const d = cb(); return () => { if (typeof d === 'function') d() } },
     on: (event: string, handler: Captured['listeners'] extends Map<string, infer H> ? H : never) => {
       captured.listeners.set(event, handler)
@@ -55,7 +89,26 @@ function bootPlugin(
     webServer: { port: 0, register: (route: Captured['routes'][number]) => { captured.routes.push(route); return () => {} } },
     connection: { requestRejection: () => captured.rejection },
     logger: { warn: () => {}, error: () => {}, info: () => {} },
+    llm: {
+      resolveModelInfo: () => Promise.resolve(
+        captured.modalities === undefined ? {} : { inputModalities: captured.modalities },
+      ),
+    },
   }
+  if (captured.attachments !== null) raw['attachments'] = captured.attachments
+  captured.lateAttach = (value: FakeAttachments) => { raw['attachments'] = value }
+  // 未 inject 的服务按 cordis 真实语义**抛错**（而不是返回 undefined）：
+  // 这样「该用 ctx.get 却写了属性取值」会在测试里当场失败，而不是等宿主报加载失败。
+  const declared = new Set<string>(Array.isArray(plugin.inject) ? plugin.inject : [])
+  const services = ['tools', 'webServer', 'connection', 'attachments', 'llm']
+  const ctx = new Proxy(raw, {
+    get: (target, prop, receiver) => {
+      if (typeof prop === 'string' && services.includes(prop) && !declared.has(prop)) {
+        throw new Error(`cannot get property "${prop}" without inject`)
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
   plugin.apply(ctx, plugin.Config({}))
   return captured
 }
@@ -71,25 +124,77 @@ async function serve(captured: Captured): Promise<{ base: string, close: () => v
   return { base: `http://127.0.0.1:${String(port)}`, close: () => { server.close() } }
 }
 
+/** 注入消息里的一块内容（只收窄用例要看的那几个字段）。 */
+interface InjectedBlock {
+  type?: string
+  text?: string
+  attachment?: { attachmentId?: string, mediaType?: string }
+}
+
+/** 注入消息的结构化视图。 */
+interface InjectedMessage {
+  content?: InjectedBlock[]
+  source?: Record<string, unknown>
+}
+
 /** 走一次 pre-step：`reject` 模拟下游插件拒绝这一步。 */
 async function preStep(
   captured: Captured,
-  options: { sessionId: string, step?: number, messages?: unknown[], reject?: boolean },
-): Promise<{ kind?: string, messages?: { content?: { text?: string }[], source?: Record<string, unknown> }[] }> {
+  options: {
+    sessionId: string
+    step?: number
+    messages?: unknown[]
+    reject?: boolean
+    /** 本步的路由（决定「模型吃不吃图」的兜底分支）；不给就是解析不出来的情形。 */
+    route?: { provider: string, model: string }
+  },
+): Promise<{ kind?: string, messages?: InjectedMessage[] }> {
   const handler = captured.listeners.get('agent/pre-step')
   if (handler === undefined) throw new Error('插件没有订阅 agent/pre-step')
   const base = options.messages ?? []
   return await handler(
-    { step: options.step ?? 1, agent: { session: { id: options.sessionId } }, messages: base, signal: { aborted: false } },
+    {
+      step: options.step ?? 1,
+      agent: {
+        session: { id: options.sessionId },
+        ...options.route === undefined ? {} : { options: { provider: options.route.provider, model: options.route.model } },
+      },
+      messages: base,
+      signal: { aborted: false },
+    },
     async () => (options.reject === true ? { kind: 'reject' } : { kind: 'enter', messages: [...base] }),
-  ) as { kind?: string, messages?: { content?: { text?: string }[] }[] }
+  ) as { kind?: string, messages?: InjectedMessage[] }
 }
 
 /** 取本步注入的正文（没有注入时返回空串）。 */
-function injectedText(decision: { messages?: { content?: { text?: string }[] }[] }): string {
+function injectedText(decision: { messages?: InjectedMessage[] }): string {
   const last = decision.messages?.at(-1)
   const text = last?.content?.[0]?.text ?? ''
   return text.includes('旁路提示') ? text : ''
+}
+
+/** 取本步注入的 image 块（没有就返回空数组）。 */
+function injectedImages(decision: { messages?: InjectedMessage[] }): { attachmentId?: string }[] {
+  const last = decision.messages?.at(-1)
+  return (last?.content ?? []).filter(block => block.type === 'image').map(block => block.attachment ?? {})
+}
+
+/** 造一张真 PNG 的上行载荷（base64 + 声明类型）。 */
+function pngUpload(name = 'shot.png', width = 4, height = 3): { mediaType: string, data: string, name: string } {
+  return { mediaType: 'image/png', data: tinyPng(width, height).toString('base64'), name }
+}
+
+/** 走一次带图入队（返回响应与解析后的 body）。 */
+async function pushHint(
+  baseUrl: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number, body: Record<string, unknown> }> {
+  const response = await fetch(`${baseUrl}/dsh-szg-hint`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
 
 /** 挂在 SSE 通道上，收集 `hint` 动作帧（前端据此弹 toast）。 */
@@ -138,7 +243,10 @@ describeIfBuilt('dsh-szg-hint 行为（需要 lib/ 产物）', () => {
     server = await serve(captured)
   })
 
-  afterAll(() => { server.close() })
+  afterAll(() => {
+    // 构建产物装载失败时 `beforeAll` 会抛错、`server` 从未赋值：别让清理掩盖真正的失败原因。
+    if (server !== undefined) server.close()
+  })
 
   it('空队列快照是结构完整的，前端能直接按它渲染', async () => {
     const state = await (await fetch(`${base()}/dsh-szg-hint/state`)).json() as Record<string, unknown>
@@ -346,12 +454,185 @@ describeIfBuilt('dsh-szg-hint 行为（需要 lib/ 产物）', () => {
     expect(String(cancelled?.['text'] ?? '')).toContain('撤销回执要认会话')
   })
 
-  it('模型侧工具契约：hint_send 收 text/sessionId，hint_status 说明 `*` = 全部会话', () => {
+  it('模型侧工具契约：hint_send 收 text/sessionId/images，hint_status 说明 `*` = 全部会话', () => {
     const send = captured.tools.get('hint_send')
     const status = captured.tools.get('hint_status')
-    expect(Object.keys(send?.parameters?.properties ?? {})).toEqual(['text', 'sessionId'])
+    expect(Object.keys(send?.parameters?.properties ?? {})).toEqual(['text', 'sessionId', 'images'])
     expect(send?.description?.length ?? 0).toBeGreaterThan(20)
     expect(status?.parameters?.properties?.['sessionId']?.description).toContain('*')
+  })
+
+  it('空队列快照带上图片限额（前端据此决定附图入口是否可用）', async () => {
+    const state = await (await fetch(`${base()}/dsh-szg-hint/state`)).json() as { imageLimits?: Record<string, unknown> }
+    expect(state.imageLimits?.['enabled']).toBe(true)
+    expect(state.imageLimits?.['maxImages']).toBe(3)
+    expect(state.imageLimits?.['mediaTypes']).toContain('image/png')
+  })
+
+  it('带图入队：快照里能看到引用，图片路由按「提示 id + 序号」回吐字节', async () => {
+    const upload = pngUpload('登录页报错.png', 4, 3)
+    const created = await pushHint(base(), { text: '看这张报错截图', sessionId: 'sess-IMG', images: [upload] })
+    expect(created.status).toBe(200)
+    expect(created.body['imageCount']).toBe(1)
+    const hintId = created.body['hintId'] as number
+
+    const state = await (await fetch(`${base()}/dsh-szg-hint/state`)).json() as {
+      pending: { id: number, content: string, images: { attachmentId: string, width: number, height: number, name?: string }[] }[]
+    }
+    const item = state.pending.find(entry => entry.id === hintId)
+    expect(item?.content).toBe('看这张报错截图')
+    expect(item?.images).toHaveLength(1)
+    expect(item?.images[0]?.width).toBe(4)
+    expect(item?.images[0]?.height).toBe(3)
+    expect(item?.images[0]?.name).toBe('登录页报错.png')
+    expect(item?.images[0]?.attachmentId.startsWith('sha256:')).toBe(true)
+
+    const image = await fetch(`${base()}/dsh-szg-hint/image/${String(hintId)}/0`)
+    expect(image.status).toBe(200)
+    expect(image.headers.get('content-type')).toBe('image/png')
+    expect(image.headers.get('cache-control')).toContain('immutable')
+    const bytes = Buffer.from(await image.arrayBuffer())
+    expect(bytes.equals(tinyPng(4, 3))).toBe(true)
+
+    // 越界序号与不存在的提示都回 404（不是空 200，也不是 500）。
+    expect((await fetch(`${base()}/dsh-szg-hint/image/${String(hintId)}/3`)).status).toBe(404)
+    expect((await fetch(`${base()}/dsh-szg-hint/image/999999/0`)).status).toBe(404)
+    // 撤销之后图片立刻取不到（队列删了，图也就不该再被这条路由吐出来）。
+    expect((await fetch(`${base()}/dsh-szg-hint`, {
+      method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: hintId }),
+    })).status).toBe(200)
+    expect((await fetch(`${base()}/dsh-szg-hint/image/${String(hintId)}/0`)).status).toBe(404)
+  })
+
+  it('纯图提示合法（不打字只发图）；两者都空才拒绝', async () => {
+    const onlyImage = await pushHint(base(), { text: '   ', sessionId: 'sess-IMG2', images: [pngUpload('纯图.png')] })
+    expect(onlyImage.status).toBe(200)
+    expect(onlyImage.body['imageCount']).toBe(1)
+
+    const empty = await pushHint(base(), { text: '  ', sessionId: 'sess-IMG2' })
+    expect(empty.status).toBe(400)
+  })
+
+  it('图片限额：张数、单张字节、媒体类型三条闸门都在写库之前', async () => {
+    const tooMany = await pushHint(base(), {
+      text: '四张太多',
+      sessionId: 'sess-LIMIT',
+      images: [pngUpload('a.png'), pngUpload('b.png'), pngUpload('c.png'), pngUpload('d.png')],
+    })
+    expect(tooMany.status).toBe(400)
+    expect(String(tooMany.body['error'])).toContain('最多带 3 张')
+
+    const notImage = await pushHint(base(), {
+      text: '这不是图',
+      sessionId: 'sess-LIMIT',
+      images: [{ mediaType: 'image/png', data: Buffer.from('definitely not a png').toString('base64'), name: 'fake.png' }],
+    })
+    expect(notImage.status).toBe(400)
+    expect(String(notImage.body['error'])).toContain('入库失败')
+
+    const badType = await pushHint(base(), {
+      text: '类型不在白名单',
+      sessionId: 'sess-LIMIT',
+      images: [{ mediaType: 'image/tiff', data: pngUpload().data, name: 'x.tiff' }],
+    })
+    expect(badType.status).toBe(400)
+    expect(String(badType.body['error'])).toContain('白名单')
+
+    const saved = captured.attachments?.savedCount ?? 0
+    const state = await (await fetch(`${base()}/dsh-szg-hint/state`)).json() as { pending: { content: string }[] }
+    expect(state.pending.map(item => item.content)).not.toContain('四张太多')
+    expect(state.pending.map(item => item.content)).not.toContain('这不是图')
+    expect(captured.attachments?.savedCount ?? 0).toBe(saved)
+  })
+
+  it('带图注入：正文列附图清单，image 块按顺序跟在后面', async () => {
+    await pushHint(base(), {
+      text: '照这张参考图改',
+      sessionId: 'sess-INJ-IMG',
+      images: [pngUpload('参考图.png', 8, 6), pngUpload('现状.png', 2, 2)],
+    })
+    const decision = await preStep(captured, { sessionId: 'sess-INJ-IMG' })
+    const text = injectedText(decision)
+    expect(text).toContain('1. 照这张参考图改')
+    expect(text).toContain('附图 1：参考图.png（8x6，image/png')
+    expect(text).toContain('附图 2：现状.png（2x2，image/png')
+    const images = injectedImages(decision)
+    expect(images).toHaveLength(2)
+    expect(images[0]?.attachmentId?.startsWith('sha256:')).toBe(true)
+    // 同一张图在前面的快照里出现过：id 一致（内容寻址，不是每次重算）。
+    expect(images[0]?.attachmentId).not.toBe(images[1]?.attachmentId)
+  })
+
+  it('纯图注入的正文不空：给模型一句「无文字说明，见附图」', async () => {
+    await pushHint(base(), { text: '', sessionId: 'sess-INJ-ONLY', images: [pngUpload('只看图.png')] })
+    const decision = await preStep(captured, { sessionId: 'sess-INJ-ONLY' })
+    const text = injectedText(decision)
+    expect(text).toContain('1. （无文字说明，见附图）')
+    expect(injectedImages(decision)).toHaveLength(1)
+  })
+
+  it('本步模型不吃图时，正文补上本机只读副本路径（让 agent 能自己去读）', async () => {
+    const textOnly = bootPlugin(plugin, undefined, { modalities: ['text'] })
+    const textOnlyServer = await serve(textOnly)
+    try {
+      await pushHint(textOnlyServer.base, {
+        text: '这张图你看一下',
+        sessionId: 'sess-TEXTONLY',
+        images: [pngUpload('只有文字模型.png')],
+      })
+      const decision = await preStep(textOnly, {
+        sessionId: 'sess-TEXTONLY',
+        route: { provider: 'p', model: 'text-only' },
+      })
+      expect(injectedText(decision)).toContain('本步模型不接受图片输入')
+      expect(injectedText(decision)).toContain('C:/fake/attachments/')
+      // 图块照旧带上：投影成占位文字由核心决定，插件不替它做决定。
+      expect(injectedImages(decision)).toHaveLength(1)
+    } finally {
+      textOnlyServer.close()
+    }
+  })
+
+  it('附件服务缺席：图片入口整体降级，纯文字照常', async () => {
+    const withoutAttachments = bootPlugin(plugin, undefined, { attachments: null })
+    const bare = await serve(withoutAttachments)
+    try {
+      const state = await (await fetch(`${bare.base}/dsh-szg-hint/state`)).json() as { imageLimits?: Record<string, unknown> }
+      expect(state.imageLimits?.['enabled']).toBe(false)
+
+      const rejected = await pushHint(bare.base, { text: '带图但不支持', sessionId: 'sess-NOATT', images: [pngUpload()] })
+      expect(rejected.status).toBe(400)
+      expect(String(rejected.body['error'])).toContain('附件服务')
+
+      const textOnly = await pushHint(bare.base, { text: '纯文字照常', sessionId: 'sess-NOATT' })
+      expect(textOnly.status).toBe(200)
+    } finally {
+      bare.close()
+    }
+  })
+
+  it('工具面：hint_send 能按本机路径附图，hint_status 报出图数', async () => {
+    const send = captured.tools.get('hint_send') as unknown as {
+      execute: (args: Record<string, unknown>, exec: unknown) => Promise<string>
+    }
+    const status = captured.tools.get('hint_status') as unknown as {
+      execute: (args: Record<string, unknown>, exec: unknown) => Promise<string>
+    }
+    const pngPath = join(process.env['DSH_HOME'] ?? '', 'tool-shot.png')
+    writeFileSync(pngPath, tinyPng(6, 5))
+
+    const sent = await send.execute({ text: '工具发的图', sessionId: 'sess-TOOL', images: [pngPath] }, { agent: { session: { id: 'sess-TOOL' } } })
+    expect(sent).toContain('含 1 张图')
+
+    const reported = await status.execute({ sessionId: 'sess-TOOL' }, { agent: { session: { id: 'sess-TOOL' } } })
+    expect(reported).toContain('工具发的图')
+    expect(reported).toContain('含 1 张图')
+    expect(reported).toContain('图片能力：可用')
+
+    const missing = await send.execute({ text: '路径不存在', sessionId: 'sess-TOOL', images: ['C:/nope/not-here.png'] }, {})
+    expect(missing).toContain('未投递')
+    const wrongType = await send.execute({ text: '不是图', sessionId: 'sess-TOOL', images: [join(process.env['DSH_HOME'] ?? '', 'note.txt')] }, {})
+    expect(wrongType).toContain('不是支持的图片后缀')
   })
 })
 
@@ -361,7 +642,7 @@ describeIfBuilt('数据面的来源校验（信任围栏）', () => {
   let server: { base: string, close: () => void }
 
   beforeAll(async () => {
-    // 与主行为块同一装载方式：产物从 lib/ 动态导入（跳过场景下不会被求值）。
+    // 与主行为块同一装载方式：产物动态导入（跳过场景下不会被求值）。
     plugin = (await import(LIB)) as typeof plugin
     captured = bootPlugin(plugin)
     server = await serve(captured)
@@ -375,7 +656,7 @@ describeIfBuilt('数据面的来源校验（信任围栏）', () => {
   /** 带 redirect:manual —— 否则 fetch 会把 3xx / 4xx 处理得看不出原始状态。 */
   const getState = (): Promise<Response> => fetch(`${server.base}/dsh-szg-hint/state`, { redirect: 'manual' })
 
-  const postHint = (): Promise<Response> => fetch(`${server.base}/dsh-szg-hint`, {
+  const writeHint = (): Promise<Response> => fetch(`${server.base}/dsh-szg-hint`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ text: '未认证也不该写进来', sessionId: '' }),
@@ -396,16 +677,54 @@ describeIfBuilt('数据面的来源校验（信任围栏）', () => {
 
   it('信任围栏判 401 时写接口被拒（否则任何人可向任务注入指令）', async () => {
     captured.rejection = 401
-    expect((await postHint()).status).toBe(401)
+    expect((await writeHint()).status).toBe(401)
     captured.rejection = undefined
     const seen = await (await getState()).json() as { pending?: { content?: string }[] }
     expect((seen.pending ?? []).some(x => x.content === '未认证也不该写进来')).toBe(false)
+  })
+
+  it('信任围栏判 401 时取图接口同样被拒（图片也不能裸奔）', async () => {
+    captured.rejection = undefined
+    const created = await pushHint(server.base, { text: '取图围栏', sessionId: 'sess-FENCE', images: [pngUpload('围栏.png')] })
+    const hintId = created.body['hintId'] as number
+    expect((await fetch(`${server.base}/dsh-szg-hint/image/${String(hintId)}/0`)).status).toBe(200)
+
+    captured.rejection = 401
+    expect((await fetch(`${server.base}/dsh-szg-hint/image/${String(hintId)}/0`)).status).toBe(401)
+    captured.rejection = undefined
   })
 
   it('信任围栏判 403 时按 403 回（Host 不受信）', async () => {
     captured.rejection = 403
     expect((await getState()).status).toBe(403)
     captured.rejection = undefined
+  })
+})
+
+describeIfBuilt('附件服务晚挂载（软依赖就地升级）', () => {
+  it('插件先加载、服务后到：不必重启，下一次请求就启用图片', async () => {
+    const plugin = (await import(LIB)) as {
+      apply: (ctx: unknown, config: unknown) => void
+      Config: (input: object) => unknown
+    }
+    // 宿主此刻还没有附件服务（`attachments: null`）：插件必须照常加载，图片先按降级快照。
+    const captured = bootPlugin(plugin, undefined, { attachments: null })
+    const server = await serve(captured)
+    /** 读一次快照里的图片限额（前端据此决定附图入口能不能用）。 */
+    const readLimits = async (): Promise<{ enabled?: boolean } | undefined> => {
+      const body = await (await fetch(`${server.base}/dsh-szg-hint/state`)).json() as {
+        imageLimits?: { enabled?: boolean }
+      }
+      return body.imageLimits
+    }
+    try {
+      expect((await readLimits())?.enabled).toBe(false)
+      // 服务此刻才挂上（真实宿主里 include:attachment-local 可能晚于本条目激活）。
+      captured.lateAttach(createFakeAttachments())
+      expect((await readLimits())?.enabled).toBe(true)
+    } finally {
+      server.close()
+    }
   })
 })
 

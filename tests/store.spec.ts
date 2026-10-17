@@ -11,6 +11,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { HintImageRef } from '../src/protocol.ts'
 import { HintStore, type HintStoreOptions } from '../src/store.ts'
 
 const dirs: string[] = []
@@ -170,5 +171,99 @@ describe('HintStore', () => {
     expect(snapshot.recentConsumed).toHaveLength(1)
     expect(snapshot.recentConsumed[0]?.text).toHaveLength(80)
     expect(snapshot.maxContentChars).toBe(2000)
+    // 图片限额由调用方注入（队列自己不持有配置）：缺省给「未启用」的保守形状。
+    expect(snapshot.imageLimits.enabled).toBe(false)
+  })
+})
+
+describe('HintStore · 附图', () => {
+  /** 一张假引用（形状与附件服务给的引用一致）。 */
+  const image = (id: string, name = 'shot.png'): HintImageRef => ({
+    attachmentId: `sha256:${id}`,
+    mediaType: 'image/png',
+    bytes: 1234,
+    width: 1600,
+    height: 900,
+    name,
+  })
+
+  it('带图入队：引用跟着条目走，快照与最近已参考都带图信息', () => {
+    const { store } = makeStore()
+    const pushed = store.push('s1', '看这张', 'web', [image('a'), image('b', 'b.png')])
+    expect(pushed.item?.images).toHaveLength(2)
+    expect(store.snapshot().pending[0]?.images.map(item => item.name)).toEqual(['shot.png', 'b.png'])
+
+    store.consume('s1', 1)
+    const recent = store.snapshot().recentConsumed[0]
+    expect(recent?.imageCount).toBe(2)
+    // 已参考列表只留计数：缩略图没必要为历史条目再拉一次字节。
+    expect(Object.keys(recent ?? {})).not.toContain('images')
+  })
+
+  it('纯图提示合法（正文空、有图）；两者都空才拒绝', () => {
+    const { store } = makeStore()
+    expect(store.push('s1', '   ', 'web').item).toBeNull()
+    const onlyImage = store.push('s1', '   ', 'web', [image('only')])
+    expect(onlyImage.item?.content).toBe('')
+    expect(onlyImage.item?.images).toHaveLength(1)
+  })
+
+  it('按「提示 id + 序号」取图；越界与不存在的条目都返回 undefined', () => {
+    const { store } = makeStore()
+    const pushed = store.push('s1', '取图', 'web', [image('a'), image('b')])
+    const id = pushed.item?.id ?? 0
+    expect(store.imageAt(id, 0)?.attachmentId).toBe('sha256:a')
+    expect(store.imageAt(id, 1)?.attachmentId).toBe('sha256:b')
+    expect(store.imageAt(id, 2)).toBeUndefined()
+    expect(store.imageAt(9999, 0)).toBeUndefined()
+  })
+
+  it('持久化：重建后图片引用还在（内容寻址的引用是跨重启有效的）', () => {
+    const { store, dir } = makeStore()
+    store.push('s1', '重启也在', 'web', [image('persist')])
+    const reloaded = new HintStore(dir)
+    expect(reloaded.pendingFor('s1')[0]?.images[0]?.attachmentId).toBe('sha256:persist')
+    expect(reloaded.imageAt(1, 0)?.bytes).toBe(1234)
+  })
+
+  it('老日志（没有 images 字段的行）回放成「没有图」，不炸也不猜', () => {
+    const { store, dir } = makeStore()
+    store.push('s1', '旧格式', 'web')
+    const file = join(dir, 'dsh-szg-hint', 'hints.jsonl')
+    const legacy = JSON.stringify({
+      op: 'put',
+      item: { id: 1, sessionId: 's1', content: '旧格式', meta: 'web', status: 'pending', createdAt: 1, consumedAt: null },
+    })
+    writeFileSync(file, `${legacy}\n`, 'utf8')
+
+    const reloaded = new HintStore(dir)
+    const item = reloaded.pendingFor('s1')[0]
+    expect(item?.images).toEqual([])
+    expect(reloaded.snapshot().pending[0]?.images).toEqual([])
+  })
+
+  it('附图字段坏掉时按「没有图」处理（一行坏数据不该让整条提示消失）', () => {
+    const { store, dir } = makeStore()
+    store.push('s1', '坏图字段', 'web')
+    const file = join(dir, 'dsh-szg-hint', 'hints.jsonl')
+    const broken = JSON.stringify({
+      op: 'put',
+      item: {
+        id: 1, sessionId: 's1', content: '坏图字段', meta: 'web', status: 'pending', createdAt: 1, consumedAt: null,
+        images: [{ mediaType: 'image/png' }, null, 42],
+      },
+    })
+    writeFileSync(file, `${broken}\n`, 'utf8')
+
+    const reloaded = new HintStore(dir)
+    expect(reloaded.pendingFor('s1')[0]?.images).toEqual([])
+    expect(reloaded.pendingFor('s1')[0]?.content).toBe('坏图字段')
+  })
+
+  it('积压挤人时，纯图提示的摘要说得出「图片 ×N」', () => {
+    const { store } = makeStore({ maxPendingPerSession: 1 })
+    store.push('s1', '', 'web', [image('a'), image('b')])
+    const second = store.push('s1', '第二条', 'web')
+    expect(second.dropped).toBe('（图片 ×2）')
   })
 })

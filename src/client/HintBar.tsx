@@ -1,7 +1,7 @@
 /**
  * 旁路提示 · 发送键旁的紧凑入口（浏览器半边）。
  *
- * 交互语义：跑任务时随时插一句，AI 下一步参考到，任务不被打断。
+ * 交互对齐 szg 的「💡 发提示」：跑任务时随时插一句，AI 下一步参考到，任务不被打断。
  * 形态与其差异（都是 dsh 侧的设计决定）：
  *  - 入口是**紧凑图标按钮**（28px 圆，与工具行左侧 `+` 同规格），落在 `conversation.input.right`
  *    ——发送键那一排、模型选择器之前；不再是占一整行的条带（那是 `conversation.input.dock`
@@ -11,6 +11,14 @@
  *  - 入口**常驻**（szg 只在运行时显示）：空闲时发的提示会排队等下一个任务，用户需要看得见它；
  *    运行中图标点亮为品牌色，有待参考时右上角出现计数角标。
  *  - 「AI 已参考」回执来自宿主 SSE（`hint` 帧），断线时靠轮询快照兜底，刷新不丢。
+ *
+ * ## 附图（2026-10-15 增补）
+ *
+ * 三种入口都能附图，覆盖「用户看到问题的那一瞬间」：**粘贴**（截图后 Ctrl+V，最常用）、
+ * **拖放**（把文件拖到面板上）、**点选**（隐藏的 file input）。图在本地先压（见
+ * `./image-prep.ts`），再以 base64 随 POST 上行；面板里画的是本地 object URL，
+ * 零往返就能看到自己附了什么。待参考列表里的缩略图走宿主的
+ * `GET /dsh-szg-hint/image/<id>/<index>`（按「提示 id + 序号」取，不暴露 attachmentId）。
  *
  * 组件只做渲染与本地交互状态：数据来自注入的 `useHintState`（link 的 observable），
  * 写操作来自注入的 `hintSend` / `hintCancel` 回调——组件自己不碰 fetch。
@@ -26,37 +34,54 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
   type ReactElement,
 } from 'react'
+import type { HintImageLimits, HintImageRef, HintImageUpload } from '../protocol.ts'
+import { prepareImage, type DraftImage } from './image-prep.ts'
 import type { HintActionEvent, HintLinkState, HintWriteResult } from './link.ts'
 import styles from './hint.module.css'
 
 /**
- * 渲染器交给组件的裸 observable：`hooks` 隔间的每一项被绑成 `use<Name>`。
- * 本地声明，理由见 `./index.ts` 模块头（独立仓库不带宿主类型增强）。
+ * 宿主快照源的**最小结构面**（本地声明）。
+ *
+ * 为什么不在独立仓库里 `import type` 宿主包：本包对外发布，装到别人的 dsh 上时不会带上
+ * 宿主包的类型增强；跨包 import 还会把整张宿主类型图（以及它依赖的几十个包）拖进构建。
+ * 组件只用到 `getSnapshot` / `subscribe` 两个成员，按结构本地声明即可，运行时完全一致。
  */
 export interface HostObservable<T> {
+  /** 读当前快照（渲染器据此建立 uSES 订阅）。 */
   getSnapshot(): T
-  subscribe(listener: () => void): () => void
+  /** 订阅快照失效；返回退订函数。 */
+  subscribe(fn: () => void): () => void
 }
+
+/** 渲染器把 `hooks.hintState` 绑成的选择器 Hook（`useHintState`）。 */
+export type SnapshotSelectorHook<T> = <S>(sel: (s: T) => S, eq?: (a: S, b: S) => boolean) => S
+
+/**
+ * `conversation.input.right` 槽位标准 props 里本组件用到的部分 + 注入面。
+ *
+ * 只声明实际读到的字段：`sessionId` 来自槽位的会话域标准 props，`useHintState` 由
+ * `hooks.hintState` 绑定而来，`hintSend` / `hintCancel` 是 `apply` 注入的业务回调。
+ */
+export type HintBarProps = {
+  /** 本条带所属会话（提示默认落到这个会话）。 */
+  sessionId: string
+  /** 宿主链路快照（选择器 Hook）。 */
+  useHintState: SnapshotSelectorHook<HintLinkState>
+} & Pick<HintBarInjected, 'hintSend' | 'hintCancel'>
 
 /** 提示入口注入给组件的业务面（`apply` 的 inject 工厂产出）。 */
 export interface HintBarInjected {
   /** 宿主链路快照（裸 observable → 渲染器绑成 `useHintState`）。 */
   hooks: { hintState: HostObservable<HintLinkState> }
-  /** 发一条提示（落到本条带所属的会话）。 */
-  hintSend: (text: string) => Promise<HintWriteResult>
+  /** 发一条提示（落到本条带所属的会话）；`images` 为已压好的附图。 */
+  hintSend: (text: string, images: readonly HintImageUpload[]) => Promise<HintWriteResult>
   /** 撤销一条待参考的提示。 */
   hintCancel: (id: number) => Promise<HintWriteResult>
-}
-
-/** 槽位运行时 props 里本组件用到的那一份（会话域补 `sessionId`）。 */
-export interface HintBarProps extends HintBarInjected {
-  /** 本条带所属会话。 */
-  sessionId: string
-  /** 由 inject 的 `hooks.hintState` 绑成的 hook。 */
-  useHintState: <T>(selector: (value: HintLinkState) => T) => T
 }
 
 /** 轻提示。 */
@@ -72,6 +97,14 @@ const TOAST_TTL_MS = 4200
 const TOAST_STACK_MAX = 4
 /** 「最近已参考」在面板里展示几条。 */
 const RECENT_SHOWN = 3
+/** 图片类型白名单（宿主缺席时的兜底；正常情况下用快照里的限额）。 */
+const FALLBACK_LIMITS: HintImageLimits = {
+  enabled: false,
+  maxImages: 3,
+  maxImageBytes: 4 * 1024 * 1024,
+  maxTotalBytes: 12 * 1024 * 1024,
+  mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+}
 
 /**
  * 轻提示的去重键。
@@ -90,6 +123,27 @@ function toastKey(action: 'added' | 'consumed' | 'cancelled' | 'cancelFailed', i
 }
 
 /**
+ * 字节数的人读文案（附图角标用）。
+ * @param bytes - 字节数。
+ * @returns 形如 `312 KB`。
+ */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${String(Math.max(0, Math.round(bytes)))} B`
+  if (bytes < 1024 * 1024) return `${String(Math.round(bytes / 1024))} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * 取该条待参考提示里某张图的地址（宿主按「提示 id + 序号」回吐字节）。
+ * @param hintId - 提示 id。
+ * @param index - 图序号。
+ * @returns 相对 URL。
+ */
+function imageUrlOf(hintId: number, index: number): string {
+  return `/dsh-szg-hint/image/${String(hintId)}/${String(index)}`
+}
+
+/**
  * 发送键旁的提示入口（图标按钮 + 上弹面板）。
  * @param props - 槽位标准 props（含 `sessionId`）与注入面。
  * @returns 入口元素。
@@ -102,14 +156,30 @@ export function HintBar({
   const event = link.event
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
+  const [drafts, setDrafts] = useState<DraftImage[]>([])
   const [busy, setBusy] = useState(false)
+  const [preparing, setPreparing] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const [preview, setPreview] = useState<{ url: string, caption: string } | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
+  /** 面板水平修正量（px）：面板右边缘锚在按钮上，窄窗时左侧会被视口切掉。 */
+  const [panelShift, setPanelShift] = useState(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
   const draftRef = useRef<HTMLTextAreaElement | null>(null)
+  const fileRef = useRef<HTMLInputElement | null>(null)
   const toastSeq = useRef(0)
   const seenKeys = useRef(new Set<string>())
   const lastEventSeq = useRef(0)
+  const imageSeq = useRef(0)
+  /** 最新一批附图（发送时用 ref 读，避免把 object URL 的清理绑在 state 上）。 */
+  const draftsRef = useRef<DraftImage[]>([])
+  /** 大图预览是否开着（Esc 要据此决定「关预览」还是「关面板」，用 ref 免得重挂事件）。 */
+  const previewOpenRef = useRef(false)
+  draftsRef.current = drafts
+  previewOpenRef.current = preview !== null
 
+  const limits = snapshot?.imageLimits ?? FALLBACK_LIMITS
   const running = snapshot?.runningSessions.includes(sessionId) ?? false
   const pending = useMemo(
     () => (snapshot?.pending ?? []).filter(item => item.sessionId === sessionId || item.sessionId.length === 0),
@@ -140,6 +210,80 @@ export function HintBar({
     }, TOAST_TTL_MS)
   }, [])
 
+  /**
+   * 丢掉一张待发图（连带释放它的 object URL，否则每删一张就漏一份内存）。
+   * @param key - 本地 key。
+   */
+  const dropDraft = useCallback((key: number) => {
+    setDrafts(list => {
+      const target = list.find(item => item.key === key)
+      if (target !== undefined) URL.revokeObjectURL(target.previewUrl)
+      return list.filter(item => item.key !== key)
+    })
+  }, [])
+
+  /** 清空全部待发图（发送成功或关闭面板时调用）。 */
+  const clearDrafts = useCallback(() => {
+    for (const item of draftsRef.current) URL.revokeObjectURL(item.previewUrl)
+    setDrafts([])
+  }, [])
+
+  /**
+   * 把一批文件压好放进待发清单。
+   * @param files - 用户粘贴 / 拖放 / 选择来的文件。
+   */
+  const addFiles = useCallback(async (files: readonly File[]) => {
+    if (files.length === 0) return
+    if (!limits.enabled) {
+      pushToast('err', '❌ 当前宿主没有附件服务，暂时不能带图（纯文字提示照常可用）')
+      return
+    }
+    const room = limits.maxImages - draftsRef.current.length
+    if (room <= 0) {
+      pushToast('err', `❌ 一条提示最多 ${String(limits.maxImages)} 张图，先删掉一张再加`)
+      return
+    }
+    const accepted = files.slice(0, room)
+    if (files.length > room) {
+      pushToast('warn', `⚠ 一条提示最多 ${String(limits.maxImages)} 张图，多出的 ${String(files.length - room)} 张没有加进来`)
+    }
+    setPreparing(true)
+    try {
+      const added: DraftImage[] = []
+      let total = draftsRef.current.reduce((sum, item) => sum + item.bytes, 0)
+      for (const file of accepted) {
+        imageSeq.current += 1
+        // eslint-disable-next-line no-await-in-loop -- 逐张处理：canvas 编码是重活，并发会把界面卡住。
+        const result = await prepareImage(file, limits, imageSeq.current)
+        if (!result.ok) {
+          pushToast('err', `❌ ${result.error}`)
+          continue
+        }
+        if (limits.maxTotalBytes > 0 && total + result.image.bytes > limits.maxTotalBytes) {
+          URL.revokeObjectURL(result.image.previewUrl)
+          pushToast('err', `❌ 合计会超过 ${formatBytes(limits.maxTotalBytes)}，这张没有加进来`)
+          continue
+        }
+        total += result.image.bytes
+        added.push(result.image)
+      }
+      if (added.length > 0) {
+        setDrafts(list => [...list, ...added])
+        const compressed = added.filter(item => item.compressed).length
+        pushToast('ok', compressed > 0
+          ? `已附 ${String(added.length)} 张图（其中 ${String(compressed)} 张在本地压过）`
+          : `已附 ${String(added.length)} 张图`)
+      }
+    } finally {
+      setPreparing(false)
+    }
+  }, [limits, pushToast])
+
+  // 组件卸载：把还没发出去的本地预览 URL 全部释放。
+  useEffect(() => () => {
+    for (const item of draftsRef.current) URL.revokeObjectURL(item.previewUrl)
+  }, [])
+
   // 宿主动作帧 → 轻提示。只处理本会话（或全局）的事件，别的标签页发的不该在这里弹。
   useEffect(() => {
     if (event === null || event.seq === lastEventSeq.current) return
@@ -157,7 +301,13 @@ export function HintBar({
       setOpen(false)
     }
     const onKeyDown = (keyEvent: globalThis.KeyboardEvent): void => {
-      if (keyEvent.key === 'Escape') setOpen(false)
+      if (keyEvent.key !== 'Escape') return
+      // 大图预览开着时，Esc 先关预览（预览是更「上层」的一次点击）。
+      if (previewOpenRef.current) {
+        setPreview(null)
+        return
+      }
+      setOpen(false)
     }
     document.addEventListener('pointerdown', onPointerDown, true)
     document.addEventListener('keydown', onKeyDown)
@@ -167,21 +317,73 @@ export function HintBar({
     }
   }, [open])
 
-  /** 提交一条提示。 */
+  /**
+   * 面板贴着按钮的右边缘弹出；窗口窄或按钮靠左时，左侧会被裁掉。
+   *
+   * 注意「被谁裁」不只是视口：dsh 的会话列容器（`.frame` / `.centerCol`）是
+   * `overflow: hidden`，面板一旦越出它的边界就整块消失一半——所以可用的水平区间必须是
+   * **最近一个裁剪祖先**与视口的交集，只按 `window.innerWidth` 算是修不好的（实测复现）。
+   * 用 transform 平移，不改布局。
+   */
+  useEffect(() => {
+    if (!open) {
+      setPanelShift(0)
+      return
+    }
+    const measure = (): void => {
+      const panel = panelRef.current
+      if (panel === null) return
+      const gutter = 8
+      const viewportRight = window.innerWidth
+      // 从面板往上找最近一个会裁剪的祖先，取其内容盒边界（没有就用视口）。
+      let clipLeft = 0
+      let clipRight = viewportRight
+      for (let node = panel.parentElement; node !== null && node !== document.body; node = node.parentElement) {
+        const style = window.getComputedStyle(node)
+        if (style.overflowX === 'visible' && style.overflowY === 'visible') continue
+        const box = node.getBoundingClientRect()
+        clipLeft = Math.max(clipLeft, box.left)
+        clipRight = Math.min(clipRight, box.right)
+        break
+      }
+      const rect = panel.getBoundingClientRect()
+      // 先按「当前没有平移」还原真实边缘（rect 已含上一轮平移量）。
+      const naturalLeft = rect.left - panelShift
+      const naturalRight = naturalLeft + rect.width
+      let shift = 0
+      if (naturalLeft < clipLeft + gutter) shift = clipLeft + gutter - naturalLeft
+      else if (naturalRight > clipRight - gutter) shift = clipRight - gutter - naturalRight
+      setPanelShift(Math.round(shift))
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => { window.removeEventListener('resize', measure) }
+  }, [open, panelShift])
+
+
   const submit = async (): Promise<void> => {
     const text = draft.trim()
-    if (text.length === 0) return
+    if (text.length === 0 && drafts.length === 0) return
     setBusy(true)
-    const result = await hintSend(text)
+    const images: HintImageUpload[] = drafts.map(item => ({
+      mediaType: item.mediaType,
+      data: item.data,
+      name: item.name,
+    }))
+    const result = await hintSend(text, images)
     setBusy(false)
     if (!result.ok) {
       pushToast('err', `❌ ${result.error ?? '发送失败'}`)
       return
     }
+    const withImages = images.length > 0 ? `（含 ${String(images.length)} 张图）` : ''
     setDraft('')
+    clearDrafts()
     setOpen(false)
     // 本地先给回执并把 `added` 键记进去重表：随后到达的 `added` 帧不会再弹一次。
-    pushToast('ok', running ? '💡 提示已发送，AI 将在下一步参考' : '💡 提示已保存，将在下个任务开始时参考', toastKey('added', result.hintId))
+    pushToast('ok', running
+      ? `💡 提示已发送${withImages}，AI 将在下一步参考`
+      : `💡 提示已保存${withImages}，将在下个任务开始时参考`, toastKey('added', result.hintId))
   }
 
   /**
@@ -197,14 +399,42 @@ export function HintBar({
     pushToast('warn', '已撤销这条提示', toastKey('cancelled', id))
   }
 
+  /** 粘贴：从剪贴板里挑出图片（截图后 Ctrl+V 的主路径）。 */
+  const onPaste = (pasteEvent: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const items = pasteEvent.clipboardData?.items
+    if (items === undefined) return
+    const files: File[] = []
+    for (const item of items) {
+      if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
+      const file = item.getAsFile()
+      if (file !== null) files.push(file)
+    }
+    if (files.length === 0) return
+    // 只有图、没有文字时才拦下默认行为（否则用户同时粘文字+图会被吃掉文字）。
+    if ((pasteEvent.clipboardData?.getData('text') ?? '').length === 0) pasteEvent.preventDefault()
+    void addFiles(files)
+  }
+
+  /** 拖放：把文件拖到面板上。 */
+  const onDrop = (dropEvent: DragEvent<HTMLDivElement>): void => {
+    dropEvent.preventDefault()
+    setDragging(false)
+    const files = [...(dropEvent.dataTransfer?.files ?? [])]
+    if (files.length > 0) void addFiles(files)
+  }
+
   const title = running
-    ? '给正在执行的任务加一句提示（不打断它）'
-    : '写一句提示，下个任务开始时参考'
+    ? '给正在执行的任务加一句提示（可附图，不打断它）'
+    : '写一句提示（可附图），下个任务开始时参考'
   const statusText = snapshot === null
     ? '等待宿主…'
     : running
       ? '运行中 · 下一步参考'
       : '空闲 · 下个任务参考'
+  const canSend = !busy && !preparing && (draft.trim().length > 0 || drafts.length > 0)
+  const attachTitle = limits.enabled
+    ? `附图（最多 ${String(limits.maxImages)} 张，单张 ≤ ${formatBytes(limits.maxImageBytes)}）：可粘贴 / 拖入 / 点选`
+    : '当前宿主没有附件服务，暂不支持附图'
 
   return createElement(
     'div',
@@ -243,7 +473,21 @@ export function HintBar({
     open
       ? createElement(
         'div',
-        { className: styles.panel, role: 'dialog', 'aria-label': '旁路提示' },
+        {
+          className: `${styles.panel}${dragging ? ` ${styles.panelDrop}` : ''}`,
+          ref: panelRef,
+          style: panelShift !== 0 ? { transform: `translateX(${String(panelShift)}px)` } : undefined,
+          role: 'dialog',
+          'aria-label': '旁路提示',
+          onDragOver: (dragEvent: DragEvent<HTMLDivElement>) => {
+            if (!limits.enabled) return
+            // 必须 preventDefault，否则浏览器不会派发 drop（并且会用默认行为打开文件）。
+            dragEvent.preventDefault()
+            setDragging(true)
+          },
+          onDragLeave: () => { setDragging(false) },
+          onDrop,
+        },
         createElement(
           'div',
           { className: styles.head },
@@ -269,9 +513,10 @@ export function HintBar({
           rows: 3,
           maxLength: snapshot?.maxContentChars ?? 2000,
           placeholder: running
-            ? '给正在跑的任务加一句话…（Enter 发送，Shift+Enter 换行）'
-            : '写一句提示，下个任务开始时会被参考…（Enter 发送）',
+            ? '给正在跑的任务加一句话…（可粘贴截图；Enter 发送，Shift+Enter 换行）'
+            : '写一句提示，下个任务开始时会被参考…（可粘贴截图；Enter 发送）',
           onChange: (changeEvent: ChangeEvent<HTMLTextAreaElement>) => { setDraft(changeEvent.target.value) },
+          onPaste,
           onKeyDown: (keyEvent: KeyboardEvent<HTMLTextAreaElement>) => {
             if (keyEvent.key === 'Enter' && !keyEvent.shiftKey) {
               keyEvent.preventDefault()
@@ -279,6 +524,41 @@ export function HintBar({
             }
           },
         }),
+        drafts.length > 0 || preparing
+          ? createElement(
+            'div',
+            { className: styles.thumbs },
+            drafts.map(item => createElement(
+              'div',
+              { key: item.key, className: styles.thumb },
+              createElement('img', {
+                className: styles.thumbImg,
+                src: item.previewUrl,
+                alt: item.name,
+                title: `${item.name} · ${String(item.width)}x${String(item.height)} · ${formatBytes(item.bytes)}${item.compressed ? ' · 已压缩' : ''}`,
+                onClick: () => {
+                  setPreview({
+                    url: item.previewUrl,
+                    caption: `${item.name} · ${String(item.width)}x${String(item.height)} · ${formatBytes(item.bytes)}${item.compressed ? ' · 已压缩' : ''}`,
+                  })
+                },
+              }),
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: styles.thumbRemove,
+                  title: '移除这张图',
+                  'aria-label': `移除 ${item.name}`,
+                  onClick: () => { dropDraft(item.key) },
+                },
+                '✕',
+              ),
+              item.compressed ? createElement('span', { className: styles.thumbMark }, '压') : null,
+            )),
+            preparing ? createElement('div', { className: `${styles.thumb} ${styles.thumbBusy}` }, '压缩中…') : null,
+          )
+          : null,
         createElement(
           'div',
           { className: styles.actions },
@@ -286,14 +566,68 @@ export function HintBar({
             'button',
             {
               type: 'button',
+              className: `${styles.attach}${drafts.length > 0 ? ` ${styles.attachFilled}` : ''}`,
+              disabled: !limits.enabled || drafts.length >= limits.maxImages,
+              title: attachTitle,
+              'aria-label': '附图',
+              onClick: () => { fileRef.current?.click() },
+            },
+            // 图画图标用内联 SVG 而不是 `🖼` emoji：本机字体把 U+1F5BC 渲染成单色方框字形，
+            // 在 13px 下发灰发糊，看起来像坏图标；SVG 走 currentColor，明暗主题与 hover 都能跟。
+            // 已附张数不在这里加角标——按钮下方那句「带 N 张图」和上面的缩略图已经说明，
+            // 在 28px 的按钮角上再挤一个数字只会糊成一团（实测过，像颗深绿疙瘩）。
+            createElement(
+              'svg',
+              {
+                viewBox: '0 0 16 16',
+                width: 15,
+                height: 15,
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 1.15,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+                'aria-hidden': true,
+              },
+              createElement('rect', { x: 2, y: 2.9, width: 12, height: 10.2, rx: 2.4 }),
+              createElement('circle', { cx: 5.9, cy: 6.3, r: 1.05 }),
+              createElement('path', { d: 'M2.4 11.5 5.6 8.4a1.1 1.1 0 0 1 1.55 0l1.5 1.5 1.2-1.2a1.1 1.1 0 0 1 1.56 0l2.1 2.1' }),
+            ),
+          ),
+          createElement(
+            'button',
+            {
+              type: 'button',
               className: styles.send,
-              disabled: busy || draft.trim().length === 0,
+              disabled: !canSend,
               onClick: () => { void submit() },
             },
-            busy ? '发送中…' : '发送提示',
+            busy ? '发送中…' : preparing ? '压图中…' : '发送提示',
           ),
-          createElement('span', { className: styles.actionsNote }, running ? '不打断当前任务' : '排队等下个任务'),
+          createElement(
+            'span',
+            { className: styles.actionsNote },
+            drafts.length > 0
+              ? `带 ${String(drafts.length)} 张图 · ${running ? '不打断当前任务' : '排队等下个任务'}`
+              : limits.enabled
+                ? '可粘贴 / 拖入截图'
+                : '纯文字（宿主无附件服务）',
+          ),
         ),
+        createElement('input', {
+          ref: fileRef,
+          className: styles.file,
+          type: 'file',
+          accept: limits.mediaTypes.length > 0 ? limits.mediaTypes.join(',') : 'image/*',
+          multiple: true,
+          'aria-hidden': true,
+          tabIndex: -1,
+          onChange: (changeEvent: ChangeEvent<HTMLInputElement>) => {
+            const files = [...(changeEvent.target.files ?? [])]
+            changeEvent.target.value = ''
+            void addFiles(files)
+          },
+        }),
         pending.length > 0
           ? createElement(
             'div',
@@ -302,7 +636,31 @@ export function HintBar({
             pending.map(item => createElement(
               'div',
               { key: item.id, className: styles.item },
-              createElement('span', { className: styles.itemText, title: item.content }, item.content),
+              item.images.length > 0
+                ? createElement(
+                  'div',
+                  { className: styles.itemThumbs },
+                  item.images.map((image: HintImageRef, index: number) => createElement('img', {
+                    key: image.attachmentId,
+                    className: styles.itemThumb,
+                    src: imageUrlOf(item.id, index),
+                    alt: image.name ?? '附图',
+                    title: `${image.name ?? '附图'} · ${String(image.width)}x${String(image.height)}`,
+                    onError: (imageEvent: { currentTarget: HTMLImageElement }) => { imageEvent.currentTarget.style.display = 'none' },
+                    onClick: () => {
+                      setPreview({
+                        url: imageUrlOf(item.id, index),
+                        caption: `${image.name ?? '附图'} · ${String(image.width)}x${String(image.height)} · ${formatBytes(image.bytes)}`,
+                      })
+                    },
+                  })),
+                )
+                : null,
+              createElement(
+                'span',
+                { className: styles.itemText, title: item.content.length > 0 ? item.content : '（图片提示）' },
+                item.content.length > 0 ? item.content : '（图片提示）',
+              ),
               createElement(
                 'button',
                 { type: 'button', className: styles.itemAction, onClick: () => { void cancel(item.id) } },
@@ -319,12 +677,32 @@ export function HintBar({
             recent.slice(0, RECENT_SHOWN).map(item => createElement(
               'div',
               { key: item.id, className: `${styles.item} ${styles.itemDone}` },
-              createElement('span', { className: styles.itemText, title: item.text }, item.text),
+              item.imageCount > 0
+                ? createElement('span', { className: styles.itemImgMark }, `图${String(item.imageCount)}`)
+                : null,
+              createElement(
+                'span',
+                { className: styles.itemText, title: item.text },
+                item.text.length > 0 ? item.text : '（图片提示）',
+              ),
               createElement('span', { className: styles.itemMark }, '已参考'),
             )),
           )
           : null,
         createElement('div', { className: styles.foot }, '提示不占对话历史，AI 只在下一步看到它一次'),
+      )
+      : null,
+    preview !== null
+      ? createElement(
+        'div',
+        {
+          className: styles.preview,
+          role: 'dialog',
+          'aria-label': '查看附图',
+          onClick: () => { setPreview(null) },
+        },
+        createElement('img', { className: styles.previewImg, src: preview.url, alt: preview.caption }),
+        createElement('div', { className: styles.previewCaption }, preview.caption),
       )
       : null,
     createElement(
@@ -358,13 +736,14 @@ function applyHintEvent(
 ): void {
   const mine = event.sessionId === sessionId || event.sessionId.length === 0
   if (!mine) return
+  const withImages = event.imageCount > 0 ? `（含 ${String(event.imageCount)} 张图）` : ''
   if (event.kind === 'added') {
-    pushToast('ok', running ? '💡 提示已入队，AI 将在下一步参考' : '💡 提示已入队，将在下个任务开始时参考', toastKey('added', event.ids[0]))
+    pushToast('ok', running ? `💡 提示已入队${withImages}，AI 将在下一步参考` : `💡 提示已入队${withImages}，将在下个任务开始时参考`, toastKey('added', event.ids[0]))
     return
   }
   if (event.kind === 'consumed') {
     const suffix = event.text.length > 0 ? `：${event.text}` : ''
-    pushToast('ok', `💡 AI 已参考你的提示${suffix}`, toastKey('consumed', event.ids[0]))
+    pushToast('ok', `💡 AI 已参考你的提示${withImages}${suffix}`, toastKey('consumed', event.ids[0]))
     return
   }
   pushToast('warn', '已撤销提示', toastKey('cancelled', event.ids[0]))
