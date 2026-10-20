@@ -42,7 +42,7 @@ Once installed you can simply tell the agent: "send a sidecar hint to the runnin
 ## Installation
 
 ```sh
-# from npm (after release)
+# from npm
 dsh plugin --profile web add dsh-szg-hint
 
 # from GitHub source (pnpm ≥10 asks you to allow build scripts; the first add fails with the exact package key)

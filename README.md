@@ -43,7 +43,7 @@
 ## 安装
 
 ```sh
-# 从 npm（发布后）
+# 从 npm
 dsh plugin --profile web add dsh-szg-hint
 
 # 从 GitHub 源码（pnpm ≥10 需按提示授权构建脚本，首次 add 会失败并给出确切包键）
