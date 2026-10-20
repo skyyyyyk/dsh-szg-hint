@@ -15,6 +15,33 @@
 `agent/inbox/claimed`），本插件的注入走 `agent/pre-step` 只追加进**当前这一步**的请求，
 不调 `session.append`——所以刷新页面后聊天区看不到它，模型也只看到一次。
 
+![输入框工具行右侧的灯泡入口](docs/screenshot-entry.png)
+![旁路提示面板：写一句话，可附图](docs/screenshot-panel.png)
+
+任务跑着的时候，面板里的提示不会打断它——模型在**下一步**看到，然后接着干：
+
+![任务运行中插入提示](docs/screenshot-context.png)
+
+## 让智能体自己装（推荐）
+
+不想敲命令的话，把仓库地址和下面这段一起丢给你的编码智能体，它就能自己装好并验证：
+
+```text
+请把 dsh-szg-hint 装进本机 dsh 的 web profile：
+1. 先检查环境：dsh >= 0.2.0-rc.2，Node ^22.19 或 >=24；不满足就停下来告诉我。
+2. 安装：dsh plugin --profile web add github:skyyyyyk/dsh-szg-hint
+   - 若 pnpm >= 10 因构建脚本被拒而失败，按它给出的包键授权后重试；
+   - 仍失败就 git clone 到临时目录，再 dsh plugin --profile web add <该目录>。
+3. 验证：dsh --profile web --dump-config | grep dsh-szg-hint 必须能看到插件行。
+4. 重启 dsh web（只重启这一个进程，不要改端口）。
+5. 打开对话页，确认输入框工具行右侧有灯泡按钮；没有就把 dump-config 结果和宿主日志里
+   [dsh-szg-hint] 开头的行贴给我。
+
+不要改动其它配置。完成后报告：装的 commit、验证命令输出、是否重启成功。
+```
+
+装好后可以直接对智能体说：「给正在跑的任务发一条旁路提示：配色改成品牌绿」。
+
 ## 安装
 
 ```sh

@@ -14,6 +14,33 @@ A hint appears in exactly one step's request and is then marked as consumed (the
 
 Difference from the built-in `Agent.steer()` / `Agent.inject()`: messages sent through those channels enter the session history (see `agent/inbox/claimed`). This plugin injects through `agent/pre-step`, appending only to **the current step's** request and never calling `session.append` — so the hint is absent from the chat area after a page refresh, and the model sees it exactly once.
 
+![The lightbulb entry at the right of the composer tool row](docs/screenshot-entry.png)
+![The hint panel: one line, optionally with an image](docs/screenshot-panel.png)
+
+While a task is running, a hint does not interrupt it — the model picks it up at its **next step** and carries on:
+
+![Dropping a hint into a running task](docs/screenshot-context.png)
+
+## Let an agent install it for you
+
+If you would rather not type commands, hand your coding agent the repository URL plus this block:
+
+```text
+Install dsh-szg-hint into my local dsh web profile:
+1. Check the environment first: dsh >= 0.2.0-rc.2 and Node ^22.19 or >=24. Stop and tell me if either is missing.
+2. Install: dsh plugin --profile web add github:skyyyyyk/dsh-szg-hint
+   - If pnpm >= 10 rejects the build script, allow the exact package key it prints, then retry.
+   - If that still fails, git clone into a temp dir and run dsh plugin --profile web add <that dir>.
+3. Verify: dsh --profile web --dump-config | grep dsh-szg-hint must show the plugin line.
+4. Restart dsh web (that process only; do not change the port).
+5. Open a conversation and confirm there is a lightbulb button at the right of the composer tool row.
+   If there is none, paste the dump-config output and any host log lines starting with [dsh-szg-hint].
+
+Do not change any other settings. When done, report: the installed commit, the verify output, and whether the restart succeeded.
+```
+
+Once installed you can simply tell the agent: "send a sidecar hint to the running task: use the brand green for the accent".
+
 ## Installation
 
 ```sh
