@@ -17,9 +17,7 @@ Difference from the built-in `Agent.steer()` / `Agent.inject()`: messages sent t
 ![The lightbulb entry at the right of the composer tool row](docs/screenshot-entry.png)
 ![The hint panel: one line, optionally with an image](docs/screenshot-panel.png)
 
-While a task is running, a hint does not interrupt it — the model picks it up at its **next step** and carries on:
-
-![Dropping a hint into a running task](docs/screenshot-context.png)
+While a task is running, a hint does not interrupt it — the model picks it up at its **next step** and carries on.
 
 ## Let an agent install it for you
 
